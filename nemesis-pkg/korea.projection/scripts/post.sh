@@ -9,6 +9,8 @@ BK=/data/nemesis/backup/korea.projection
 umask 077
 mkdir -p $BK
 [ -f $BK/wifi_on ] || settings get global wifi_on 2>/dev/null > $BK/wifi_on
+# 포크: 다시 설치하면 USB Wi-Fi 동글의 재시작 기록을 지운다(막힌 동글을 다시 쓰게 하는 방법)
+rm -f $BK/dongle.blocked $BK/dongle.crashes $BK/dongle.trying
 # opt-in CarPlay log (svc/hotspot.sh, off by default): a file korea-projection-debug on the stick
 W=/data/local/tmp/korea.projection
 for u in /storage/usb0 /storage/usb1; do

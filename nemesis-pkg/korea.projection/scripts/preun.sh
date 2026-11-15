@@ -11,6 +11,8 @@ BK=/data/nemesis/backup/korea.projection
 HOTSPOT_LIB=1 . /data/nemesis/apps/korea.projection/svc/hotspot.sh
 # 쓸 수 있는 busybox가 없는 내비는 우리 hostapd를 켠 적이 없다: 오류 줄만 나오므로 건너뛴다
 has_bb && stop_all
+# 포크: USB Wi-Fi 동글 드라이버를 내린다(업데이트 때도: 새 판의 드라이버로 바뀔 수 있다)
+has_bb && dongle_down
 rm -f $CONF
 # Launch가 남긴 "설치 끝나면 다시 저장" 대기(status.sh --wait)도 멈추고, 진행 기록을 지운다.
 # 1.7.3: 감시자(--watch)와 제보 만들기(--watch·--report가 쓰는 collect.pid)도 멈춘다(업데이트 때도: 새 판이 다시 띄운다).
@@ -114,6 +116,8 @@ fi
 # (다른 곳에서 바꿨으면 그대로 둔다). 다음 부팅부터 순정이 예전처럼 AP를 복구한다. 업데이트 때는 위에서 이미 끝났다.
 # 되돌리지 못하면(settings 없음·실패) 기록은 아래에서 $BK와 함께 지워지므로 삭제 출력에 남긴다(리뷰 L1).
 apon_restore || modmsg="$modmsg 순정 핫스팟 저장값(wifi_ap_on)을 되돌리지 못했습니다. 무선 카플레이가 안 되면 제보해 주세요."
+# 포크: 동글 때문에 우리가 만든 HMG-API Wi-Fi 칩 기록을 지운다
+[ -f $BK/wifi-chip.ours ] && rm -f $WIFI_SEEN
 rm -rf $BK
 # 리뷰 L9: 되돌리기 USB(usb-modrollback)가 내비에 남긴 작업 폴더(진행·기록)도 진짜 삭제 때만 지운다(고정 표시 mod.pin은 $BK와 함께 지워짐)
 rm -rf ${KP_RB_D:-/data/local/tmp/kp-rollback}

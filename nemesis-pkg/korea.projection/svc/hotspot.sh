@@ -406,6 +406,7 @@ log_cap() {
 up() {
   $BB ifconfig wlan0 $AP_IP netmask 255.255.255.0 up 2>/dev/null
   if ! running "hostapd $CONF"; then
+    dongle_ap_begin
     hostapd $CONF >/dev/null 2>&1 &
     sleep 4
     $BB ifconfig wlan0 $AP_IP netmask 255.255.255.0 up 2>/dev/null
@@ -876,6 +877,18 @@ idle_req() { while true; do sleep 30 & wait $!; req_tick; done; }
 # 드라이버만 남는다(약 6초). 그래서 wlan0이 다시 생길 때까지 최대 20초 기다린다.
 take_wlan0() {
   wifi_lock; _lk=$?
+  # 포크: 동글의 wlan0은 Wi-Fi 서비스와 상관없이 이미 있다. svc wifi enable(내장 칩 드라이버를 올리려 함)은 하지 않고
+  # wpa_supplicant가 잡고 있으면 놓게만 한다.
+  if dongle_on; then
+    log "USB Wi-Fi 동글의 wlan0을 씀: Wi-Fi 켜기를 건너뜀"
+    if running wpa_supplicant; then $BB killall wpa_supplicant 2>/dev/null; sleep 3; fi
+    return 0
+  fi
+  # 포크: 내장 Wi-Fi 부품이 없는 차(순정 module_version 3)에 동글이 꽂혀 있지 않으면 Wi-Fi를 켜 보지 않는다(켤 칩이 없다)
+  if [ -f $DONGLE_D/88x2bu.ko ] && [ "$(cat $BK/wifi.modver 2>/dev/null)" = 3 ] && [ ! -d $WLAN ]; then
+    dongle_say nodongle "USB Wi-Fi 동글이 꽂혀 있지 않음: 꽂으면 핫스팟을 켬"
+    return 0
+  fi
   # 1.7.2(P-11): 같은 부팅에서 서비스만 다시 시작했고(SVC_FIRST=0) 드라이버(wlan0)가 이미 있고 wpa_supplicant가 없고 Wi-Fi 설정이
   # 켜져 있으면 Wi-Fi 켜기와 대기(약 9초)를 건너뛴다. 설정 파일이 아직 없으면(_lk=1) 예전처럼 켠다(Wi-Fi 서비스가 만들게).
   # 부팅 뒤 처음 시작·업데이트 뒤 첫 시작($W가 지워짐)은 늘 예전처럼 한다.
@@ -1629,6 +1642,119 @@ plan_only_mod() {
   set +f
   return $_bad
 }
+# --- USB Wi-Fi 동글 (포크 추가: 내비에 Wi-Fi 부품이 없는 차, K8 GL3 등) ---
+# 패키지의 dongle/88x2bu.ko(Realtek RTL8812BU: ipTIME A3000MINI 등)를 올려 wlan0을 만든다. 그 뒤는 내장 칩이 있는 차와
+# 같은 흐름이다(hostapd·dnsmasq·무선 모드). 내비를 못 쓰게 만들지 않도록:
+# - /system은 건드리지 않는다. 드라이버는 패키지 폴더에만 있고, 동글이 꽂혀 있을 때만 서비스가 올린다(부팅 초기가 아니라
+#   Android가 다 뜬 뒤). 동글을 빼거나 패키지를 지우면 순정 그대로다.
+# - 드라이버를 만들 때 확인한 커널 빌드(dongle/kernel.txt = /proc/version 한 줄)와 글자까지 같을 때만 올린다
+#   (내비 소프트웨어를 업데이트하면 올리지 않는다).
+# - 위험 구간(드라이버 올리기, 동글로 hostapd 처음 켜기)에 들어가기 전에 $BK/dongle.trying(부팅 id)을 남기고, 문제없이
+#   지나면 지운다. 남은 채로 다른 부팅을 맞으면(그 구간에서 내비가 재시작됨) $BK/dongle.crashes를 1 올린다.
+#   DONGLE_TRIES번이 되면 $BK/dongle.blocked를 남기고 다시는 올리지 않는다. 패키지를 다시 설치하면(post.sh) 기록을 지운다.
+#   구간 안에서 차주가 재부팅해도 1번으로 센다(구간은 올린 뒤 DONGLE_LOAD_OK초, hostapd가 켜진 뒤 DONGLE_AP_OK초).
+DONGLE_D=${DONGLE_D:-$APP/dongle}
+DONGLE_IDS=${DONGLE_IDS:-0bda:b812}
+DONGLE_TRIES=${DONGLE_TRIES:-2}
+DONGLE_LOAD_OK=${DONGLE_LOAD_OK:-180}
+DONGLE_AP_OK=${DONGLE_AP_OK:-120}
+USBDEV=${USBDEV:-/sys/bus/usb/devices}
+MODULES=${MODULES:-/proc/modules}
+PROCVER=${PROCVER:-/proc/version}
+dongle_plugged() {
+  for _dd in $USBDEV/*; do
+    [ -f $_dd/idVendor ] && [ -f $_dd/idProduct ] || continue
+    read _dv < $_dd/idVendor; read _dq < $_dd/idProduct
+    case " $DONGLE_IDS " in *" $_dv:$_dq "*) return 0 ;; esac
+  done
+  return 1
+}
+dongle_loaded() { $BB grep -q '^88x2bu ' $MODULES 2>/dev/null; }
+# 지금 wlan0이 동글의 것인가
+dongle_on() { [ -d $WLAN ] && dongle_loaded; }
+# 같은 줄은 이번 실행에 한 번만 남긴다(30초마다 쌓이지 않게)
+dongle_say() { [ "$DONGLE_SAID" = "$1" ] && return 0; DONGLE_SAID=$1; log "$2"; }
+dongle_bid() { _db=$(cat ${BOOT_ID:-/proc/sys/kernel/random/boot_id} 2>/dev/null); _db=${_db:-none}; }
+# 위험 구간 열기·닫기
+dongle_open() { dongle_bid; $BB mkdir -p $BK; echo "$_db" > $BK/dongle.trying; $BB sync; }
+dongle_close() { rm -f $BK/dongle.trying; $BB sync; }
+# HMG-API는 Wi-Fi 칩을 본 기록($WIFI_SEEN)이 있어야 무선 모드를 받는다(SDIO 칩만 본다). 동글이 올라오면 그 기록을
+# 만들고, 우리가 만들었다는 표시($BK/wifi-chip.ours)를 둔다(패키지를 지울 때 함께 지운다).
+dongle_chip_mark() {
+  [ -f $WIFI_SEEN ] && return 0
+  [ -d ${WIFI_SEEN%/*} ] || return 0
+  : 2>/dev/null > $WIFI_SEEN && $BB chmod 644 $WIFI_SEEN && : > $BK/wifi-chip.ours && log "USB Wi-Fi 동글: HMG-API Wi-Fi 칩 기록을 만듦"
+  return 0
+}
+# 동글 드라이버를 올린다. 0: 동글의 wlan0이 있음, 1: 없음(동글 없음·올리지 않음·실패)
+dongle_up() {
+  [ -f $DONGLE_D/88x2bu.ko ] || return 1
+  if dongle_loaded; then [ -d $WLAN ]; return $?; fi
+  # 내장 칩의 wlan0이 있는 차는 동글을 쓰지 않는다
+  [ -d $WLAN ] && return 1
+  [ "$DONGLE_FAILED" = 1 ] && return 1
+  dongle_plugged || return 1
+  if [ -f $BK/dongle.blocked ]; then
+    dongle_say blocked "USB Wi-Fi 동글: 드라이버를 쓰다 내비가 재시작된 기록이 있어 올리지 않음(dongle.blocked, 패키지를 다시 설치하면 풀림)"
+    return 1
+  fi
+  if [ ! -s $DONGLE_D/kernel.txt ] || [ "$(cat $PROCVER 2>/dev/null)" != "$(cat $DONGLE_D/kernel.txt 2>/dev/null)" ]; then
+    dongle_say kernel "USB Wi-Fi 동글: 내비 커널이 드라이버를 만든 커널과 달라 올리지 않음"
+    return 1
+  fi
+  dongle_bid
+  if [ -f $BK/dongle.trying ] && [ "$(cat $BK/dongle.trying 2>/dev/null)" != "$_db" ]; then
+    _dc=$(cat $BK/dongle.crashes 2>/dev/null); case "$_dc" in ''|*[!0-9]*) _dc=0 ;; esac
+    _dc=$((_dc+1)); echo $_dc > $BK/dongle.crashes; rm -f $BK/dongle.trying
+    log "USB Wi-Fi 동글: 지난 부팅이 위험 구간에서 끝남($_dc/$DONGLE_TRIES)"
+  fi
+  _dc=$(cat $BK/dongle.crashes 2>/dev/null); case "$_dc" in ''|*[!0-9]*) _dc=0 ;; esac
+  if [ $_dc -ge $DONGLE_TRIES ]; then
+    : > $BK/dongle.blocked; $BB sync
+    notice "Korea Projection: USB Wi-Fi 동글을 쓰는 중에 내비가 ${_dc}번 재시작되어 동글 사용을 멈췄습니다. 동글을 빼 두세요."
+    return 1
+  fi
+  dongle_open
+  log "USB Wi-Fi 동글: 드라이버를 올림"
+  ${INSMOD:-insmod} $DONGLE_D/88x2bu.ko rtw_country_code=KR > $W/dongle-insmod.txt 2>&1; _dr=$?
+  _di=0
+  while [ ! -d $WLAN ] && [ $_di -lt 20 ]; do sleep 1; _di=$((_di+1)); done
+  if [ ! -d $WLAN ]; then
+    # 내비가 멈춘 것이 아니므로 구간을 닫는다. 이번 실행에서는 다시 올리지 않는다(30초마다 되풀이하지 않게).
+    DONGLE_FAILED=1; dongle_close
+    log "USB Wi-Fi 동글: 드라이버를 올렸지만 wlan0이 안 생김(insmod 종료 코드 $_dr: $($BB tr '\n' ' ' < $W/dongle-insmod.txt 2>/dev/null))"
+    return 1
+  fi
+  log "USB Wi-Fi 동글: wlan0 생김(${_di}초)"
+  dongle_chip_mark
+  # 올린 뒤 DONGLE_LOAD_OK초 동안 내비가 살아 있으면 구간을 닫는다(이 부팅에 연 구간일 때만)
+  ( sleep $DONGLE_LOAD_OK; dongle_loaded && [ "$(cat $BK/dongle.trying 2>/dev/null)" = "$_db" ] && [ ! -f $W/dongle.ap ] && dongle_close ) > /dev/null 2>&1 &
+  return 0
+}
+# up()이 동글로 hostapd를 켜기 직전에 부른다: 이번 실행에 처음이면 위험 구간을 연다
+dongle_ap_begin() {
+  dongle_on || return 0
+  [ -n "$DONGLE_AP_AT" ] && return 0
+  kp_up; DONGLE_AP_AT=${_U:-0}
+  : > $W/dongle.ap; dongle_open
+}
+# 30초 점검: 동글로 켠 hostapd가 DONGLE_AP_OK초 넘게 살아 있으면 구간을 닫고 재시작 횟수를 지운다
+dongle_settle() {
+  [ -n "$DONGLE_AP_AT" ] && [ -f $W/dongle.ap ] || return 0
+  dongle_on && running "hostapd $CONF" || return 0
+  kp_up; [ -n "$_U" ] && [ $((_U - DONGLE_AP_AT)) -ge $DONGLE_AP_OK ] || return 0
+  rm -f $W/dongle.ap $BK/dongle.crashes; dongle_close
+  log "USB Wi-Fi 동글: 핫스팟이 ${DONGLE_AP_OK}초 넘게 문제없이 켜져 있음"
+}
+# 패키지를 지우거나 바꿀 때: 드라이버를 내린다(hostapd를 멈춘 뒤에 부른다)
+dongle_down() {
+  dongle_loaded || return 0
+  $BB ifconfig wlan0 down 2>/dev/null
+  ${RMMOD:-rmmod} 88x2bu 2>/dev/null
+  dongle_loaded && { echo "USB Wi-Fi 동글 드라이버를 내리지 못함(재부팅하면 내려감)"; return 1; }
+  echo "USB Wi-Fi 동글 드라이버를 내림"
+}
+
 # Wi-Fi 칩 깨우기: 한국 내수 펌웨어에는 일반 Wi-Fi를 켜는 메뉴가 없다. 그래서 Wi-Fi를 한 번도 켜지 않은 차는
 # 칩이 SDIO에 나타나지 않는다(MAC 00:00:00…, 그랜저 IGPEHEV 제보 #7).
 # HMG-API는 칩을 SDIO에서 한 번 봐야(그 기록 $WIFI_SEEN이 있어도 됨) 칩이 있다고 본다(hmgapi.wifi).
@@ -1646,7 +1772,8 @@ plan_only_mod() {
 # 돌려주는 값: 0 칩이 보임(원래 보였거나 이번에 깨움), 1 끝남(부품 없음 wifi.nopart 또는 3번 모두 실패 wifi.nochip),
 #   2 예전에 깨우기를 해 봄(1.7.2까지의 기록, 다시 안 함), 3 아직 확인 중(다음 부팅에 다시 깨움, 1.7.3 W-4·G-1)
 wifi_chip_seen() {
-  [ -f $WIFI_SEEN ] || [ -n "$(ls $SDIO 2>/dev/null)" ]
+  # 포크: USB Wi-Fi 동글의 wlan0이 있어도 칩이 있는 것으로 본다
+  [ -f $WIFI_SEEN ] || [ -n "$(ls $SDIO 2>/dev/null)" ] || dongle_on
 }
 wifi_was_off() {
   [ -f $BK/wifi_on ] && [ "$(cat $BK/wifi_on 2>/dev/null)" != 1 ]
@@ -2568,6 +2695,8 @@ main() {
   while [ "$(getprop sys.boot_completed)" != 1 ]; do sleep 2; done
   # 시계가 맞춰진 뒤의 시각으로 다시 잡는다(경과 시간)
   PSTART=$(date +%s); PUSTART=$(prog_up)
+  # 포크: USB Wi-Fi 동글이 꽂혀 있으면 드라이버를 올린다(자동 설정의 Wi-Fi 칩 확인보다 먼저)
+  dongle_up
   # 설치 진행 기록: 설정이 끝난 차는 "확인 중", 아니면 시작(5%). 끝난 차도 핫스팟이 켜지면 "준비됨"으로 바꾼다.
   # 같은 부팅에 서비스가 다시 시작돼도 "재부팅 필요"·"실패"는 덮지 않는다
   if prog_final_this_boot; then :
@@ -2673,7 +2802,10 @@ main() {
     ap_yield && continue
     ap_tick
     conf_tick
+    # 포크: wlan0이 없으면 동글이 (다시) 꽂혔는지 본다
+    [ -d $WLAN ] || dongle_up
     up
+    dongle_settle
     aa_sig
     wifi_events; aa_events; cp_watch
     hint_tick
