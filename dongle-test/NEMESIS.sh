@@ -3,6 +3,8 @@
 # 내비에 아무것도 설치하지 않는다: 드라이버를 한 번 올려 보고(insmod) 시험이 끝나면 내린다(rmmod).
 # 재부팅하면 흔적 없이 순정 그대로다(작업 폴더 /data/nemesis/kp-dongle-test 만 남고, 이 USB를 다시 꽂으면 지운다).
 #   sh NEMESIS.sh        ① 지난 시험 결과를 USB로 옮기고 ② 새 시험을 뒤에 띄운다(USB를 빼고 동글을 꽂으면 시작)
+#                        (시험 2부터) 동글 보호 모드(kp-dongle-aa-guard)가 없으면 먼저 그것만 넣고 끝낸다(재부팅 뒤 다시 꽂음).
+#                        USB 맨 위에 kp-guard-remove 파일이 있으면 그 모드를 지운다(순정 안드로이드 오토로 되돌리기).
 #   sh test.sh run       시험 본체(/data 사본이 돈다)
 export PATH=/sbin:/vendor/bin:/system/sbin:/system/bin:/system/xbin
 export LD_LIBRARY_PATH=/vendor/lib:/system/lib
@@ -13,6 +15,8 @@ BB=$KP/bin/busybox
 WAIT_DONGLE=600
 IDS="0bda:b812"
 TCONF=/data/misc/wifi/hostapd-kptest.conf
+GUARD=kp-dongle-aa-guard
+GUARD_ZIP=kp-dongle/kp-dongle-aa-guard-1.0.0.zip
 
 stage() { echo "$(cat /proc/uptime) $*" >> $ST/stage.txt; $BB sync; }
 dongle_dev() {
@@ -59,6 +63,7 @@ if [ "$1" = run ]; then
   cd /
   echo $$ > $ST/test.pid
   stage "기다림: 동글"
+  AOA0=$(dmesg | $BB grep -c 'proc_do_submiturb.*Request (51)')
   # 동글이 꽂힌 뒤 Android가 무엇을 하는지 보려고 logcat을 처음부터 받아 둔다
   logcat -v time MicomD:S "*:V" > $ST/logcat-live.txt 2>&1 &
   LP=$!
@@ -78,6 +83,10 @@ if [ "$1" = run ]; then
   fi
   dmesg > $ST/dmesg-before.txt 2>&1
   K0=$(kbad)
+  # 동글을 꽂은 뒤 순정 안드로이드 오토가 동글에 연결 요청(AOA)을 보냈는가(보냈으면 칩이 멈춰 있다)
+  AOA1=$($BB grep -c 'proc_do_submiturb.*Request (51)' $ST/dmesg-before.txt)
+  echo "aoa probes after plug: $((AOA1 - AOA0))" >> $ST/result.txt
+  [ -f /data/hmgapi/mods/$GUARD/mod.json ] && echo "guard mod: installed" >> $ST/result.txt || echo "guard mod: none" >> $ST/result.txt
   stage "insmod 시작"
   insmod $ST/88x2bu.ko rtw_country_code=KR > $ST/insmod.txt 2>&1
   echo "rc=$?" >> $ST/insmod.txt
@@ -171,6 +180,40 @@ if [ -d $ST ]; then
   $BB sync
   # 결과를 옮긴 실행은 여기서 끝낸다(성공 창 = 통과, 실패 창 = 통과 못 함). 새 시험은 USB를 다시 꽂아 시작한다.
   exit $RC
+fi
+
+# 동글 보호 모드: 지우기 요청이 있으면 지운다
+if [ -f $USB/kp-guard-remove ]; then
+  N=1; while [ -e $USB/KP-dongle-test/guard-remove-$N.txt ]; do N=$((N+1)); done
+  G=$USB/KP-dongle-test/guard-remove-$N.txt; mkdir -p $USB/KP-dongle-test
+  { echo "## remove"; hmgapid engine remove $GUARD; echo "rc=$?"; echo "## apply"; hmgapid engine apply; echo "rc=$?"; } > $G 2>&1
+  $BB sync
+  [ -f /data/hmgapi/mods/$GUARD/mod.json ] && exit 1
+  exit 0
+fi
+# 동글 보호 모드가 없으면 그것만 넣는다. 파일·설정을 바꾸는 계획이면 적용하지 않는다(훅만 있는 모드라 바뀌는 파일이 없어야 한다)
+if [ ! -f /data/hmgapi/mods/$GUARD/mod.json ] && [ -f $USB/$GUARD_ZIP ]; then
+  mkdir -p $USB/KP-dongle-test
+  N=1; while [ -e $USB/KP-dongle-test/guard-$N.txt ]; do N=$((N+1)); done
+  G=$USB/KP-dongle-test/guard-$N.txt
+  mkdir -p $ST; cat $USB/$GUARD_ZIP > $ST/guard.zip
+  { echo "## install"; hmgapid engine install $ST/guard.zip; echo "rc=$?"; echo "## plan"; } > $G 2>&1
+  hmgapid engine plan > $ST/plan.txt 2>&1; echo "rc=$?" >> $ST/plan.txt
+  cat $ST/plan.txt >> $G
+  if [ ! -f /data/hmgapi/mods/$GUARD/mod.json ]; then
+    echo "RESULT: install failed" >> $G; rm -rf $ST; $BB sync; exit 1
+  fi
+  if $BB grep -q -E '^(change|update|restore|setting|bind|unbind|rebase|problem) |^hooks +'$GUARD' won|^hooks are off' $ST/plan.txt; then
+    # 계획에 파일·설정 변경이 있거나 우리 훅이 안 올라감: 적용하지 않고 모드를 다시 뺀다
+    { echo "## refused: plan changes files/settings or the guard won't load; removing it again"; hmgapid engine remove $GUARD; echo "rc=$?"; } >> $G 2>&1
+    echo "RESULT: refused" >> $G; rm -rf $ST; $BB sync; exit 1
+  fi
+  if ! $BB grep -q '^nothing to do' $ST/plan.txt; then
+    { echo "## apply"; hmgapid engine apply; echo "rc=$?"; } >> $G 2>&1
+  fi
+  echo "RESULT: installed (재부팅하면 켜짐)" >> $G
+  rm -rf $ST; $BB sync
+  exit 0
 fi
 
 # 새 시험 준비: 드라이버를 /data로 복사하고 뒤에서 동글을 기다린다

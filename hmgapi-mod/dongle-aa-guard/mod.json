@@ -1,0 +1,15 @@
+{
+  "id": "kp-dongle-aa-guard",
+  "name": "USB Wi-Fi dongle guard (Korea Projection)",
+  "version": "1.0.0",
+  "hmgapi": ">=1.0.0",
+  "authors": [
+    "johun204"
+  ],
+  "license": "AGPL-3.0",
+  "description": "Keeps the stock Android Auto from treating the USB Wi-Fi dongle (Realtek 0bda:b812) as a phone. Its accessory probe writes into the dongle's chip registers and hangs the chip. Every other USB device is handled as stock.",
+  "hooks": {
+    "jar": "hooks.jar",
+    "entry": "kp.dongleguard.DongleGuard"
+  }
+}
