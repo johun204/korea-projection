@@ -1659,6 +1659,10 @@ DONGLE_TRIES=${DONGLE_TRIES:-2}
 DONGLE_LOAD_OK=${DONGLE_LOAD_OK:-180}
 DONGLE_AP_OK=${DONGLE_AP_OK:-120}
 USBDEV=${USBDEV:-/sys/bus/usb/devices}
+# 켜기·끄기(bin/dongle-ctl.sh, HMG-API 앱): 순정 안드로이드 오토가 동글을 폰으로 보고 연결 요청(AOA)을 보내면 칩이 멈춘다.
+# 그래서 그것을 막는 HMG-API 모드(GUARD_ID)가 설치·켜짐이고 끔 표시($BK/dongle.off)가 없을 때만 동글을 쓴다.
+GUARD_ID=${GUARD_ID:-kp-dongle-aa-guard}
+dongle_wanted() { [ ! -f $BK/dongle.off ] && [ -f $HMGDATA/mods/$GUARD_ID/mod.json ] && [ ! -f $HMGDATA/mods/$GUARD_ID/.disabled ]; }
 MODULES=${MODULES:-/proc/modules}
 PROCVER=${PROCVER:-/proc/version}
 dongle_plugged() {
@@ -1694,6 +1698,14 @@ dongle_up() {
   [ -d $WLAN ] && return 1
   [ "$DONGLE_FAILED" = 1 ] && return 1
   dongle_plugged || return 1
+  if [ -f $BK/dongle.off ]; then
+    dongle_say off "USB Wi-Fi 동글: 꺼 둠(dongle.off): 올리지 않음"
+    return 1
+  fi
+  if ! dongle_wanted; then
+    dongle_say noguard "USB Wi-Fi 동글: 보호 모드($GUARD_ID)가 없거나 꺼져 있어 올리지 않음"
+    return 1
+  fi
   if [ -f $BK/dongle.blocked ]; then
     dongle_say blocked "USB Wi-Fi 동글: 드라이버를 쓰다 내비가 재시작된 기록이 있어 올리지 않음(dongle.blocked, 패키지를 다시 설치하면 풀림)"
     return 1
@@ -1745,6 +1757,15 @@ dongle_settle() {
   kp_up; [ -n "$_U" ] && [ $((_U - DONGLE_AP_AT)) -ge $DONGLE_AP_OK ] || return 0
   rm -f $W/dongle.ap $BK/dongle.crashes; dongle_close
   log "USB Wi-Fi 동글: 핫스팟이 ${DONGLE_AP_OK}초 넘게 문제없이 켜져 있음"
+}
+# 30초 점검: 동글 기능이 꺼졌으면(끔 표시, HMG-API 앱에서 보호 모드를 끄거나 지움) 핫스팟을 멈추고 드라이버를 내린다
+dongle_off_tick() {
+  dongle_loaded || return 0
+  dongle_wanted && return 0
+  log "USB Wi-Fi 동글: 기능이 꺼짐: 핫스팟을 멈추고 드라이버를 내림"
+  stop_ap
+  dongle_down > /dev/null
+  rm -f $W/dongle.ap; DONGLE_AP_AT=; dongle_close
 }
 # 패키지를 지우거나 바꿀 때: 드라이버를 내린다(hostapd를 멈춘 뒤에 부른다)
 dongle_down() {
@@ -2802,7 +2823,8 @@ main() {
     ap_yield && continue
     ap_tick
     conf_tick
-    # 포크: wlan0이 없으면 동글이 (다시) 꽂혔는지 본다
+    # 포크: 동글 기능이 꺼졌으면 내리고, wlan0이 없으면 동글이 (다시) 꽂혔는지 본다
+    dongle_off_tick
     [ -d $WLAN ] || dongle_up
     up
     dongle_settle

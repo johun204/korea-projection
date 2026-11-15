@@ -23,7 +23,8 @@ import hmgapi.hook.ModEntry;
  * its own register contents and takes the accessory strings as register writes (power and
  * clock control at 0x00), which hangs the chip until it loses power. So, in GPM only, the
  * manifest receivers of that broadcast skip it when the device is the dongle. Any problem
- * while hooking is logged and leaves GPM as stock.
+ * while hooking is logged and leaves GPM as stock. Off in the HMG-API app (hmgapid disable):
+ * the hook lets everything through at once.
  */
 public final class DongleGuard extends ModEntry {
     static final String GPM = "com.google.android.projection.sink";
@@ -56,6 +57,8 @@ public final class DongleGuard extends ModEntry {
                     Bridge.hookMethod(m, new MethodHook() {
                         @Override
                         protected void beforeHookedMethod(Param p) {
+                            // turned off in the HMG-API app: stock from now on (a mod off at boot isn't loaded at all)
+                            if (!mod.enabled()) return;
                             Intent i = p.args[1] instanceof Intent ? (Intent) p.args[1] : null;
                             if (i == null || !UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(i.getAction())) return;
                             UsbDevice d = i.getParcelableExtra(UsbManager.EXTRA_DEVICE);

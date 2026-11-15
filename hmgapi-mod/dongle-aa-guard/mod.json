@@ -1,7 +1,7 @@
 {
   "id": "kp-dongle-aa-guard",
   "name": "USB Wi-Fi dongle guard (Korea Projection)",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "hmgapi": ">=1.0.0",
   "authors": [
     "johun204"

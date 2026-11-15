@@ -116,6 +116,10 @@ fi
 # (다른 곳에서 바꿨으면 그대로 둔다). 다음 부팅부터 순정이 예전처럼 AP를 복구한다. 업데이트 때는 위에서 이미 끝났다.
 # 되돌리지 못하면(settings 없음·실패) 기록은 아래에서 $BK와 함께 지워지므로 삭제 출력에 남긴다(리뷰 L1).
 apon_restore || modmsg="$modmsg 순정 핫스팟 저장값(wifi_ap_on)을 되돌리지 못했습니다. 무선 카플레이가 안 되면 제보해 주세요."
+# 포크: 동글 보호 모드도 지운다(이 패키지의 동글 기능에 딸린 것)
+if [ -f $HMGDATA/mods/$GUARD_ID/mod.json ] && hmgapid ping >/dev/null 2>&1; then
+  hmgapid engine remove $GUARD_ID > $BK/guard-remove.txt 2>&1 && echo "동글 보호 모드를 지움"
+fi
 # 포크: 동글 때문에 우리가 만든 HMG-API Wi-Fi 칩 기록을 지운다
 [ -f $BK/wifi-chip.ours ] && rm -f $WIFI_SEEN
 rm -rf $BK

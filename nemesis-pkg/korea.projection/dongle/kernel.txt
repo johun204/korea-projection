@@ -1,0 +1,1 @@
+Linux version 3.18.24-tcc (vmadmin@cbcd-deploy-avnwidedolphin-090217244057-58b896dcd5-8xw6r) (gcc version 4.7 (GCC) ) #1 SMP PREEMPT Wed Sep 2 17:44:27 KST 2026

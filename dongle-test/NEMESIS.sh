@@ -16,7 +16,7 @@ WAIT_DONGLE=600
 IDS="0bda:b812"
 TCONF=/data/misc/wifi/hostapd-kptest.conf
 GUARD=kp-dongle-aa-guard
-GUARD_ZIP=kp-dongle/kp-dongle-aa-guard-1.0.0.zip
+GUARD_ZIP=kp-dongle/kp-dongle-aa-guard-1.0.1.zip
 
 stage() { echo "$(cat /proc/uptime) $*" >> $ST/stage.txt; $BB sync; }
 dongle_dev() {
