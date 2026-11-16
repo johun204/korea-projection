@@ -33,6 +33,11 @@ if ! has_bb; then
 fi
 # 상태 화면 앱: 실패해도 패키지 설치는 성공으로 둔다 (Launch를 누를 때 다시 시도)
 # 문구에 핫스팟 상태를 쓰지 않는다: 여기서는 앱만 본다(1.5.3까지 "핫스팟은 정상"이라 써서 #9·#15가 오해함)
+# 포크: 내장 Wi-Fi 부품이 없는 차(순정 module_version 3)면 USB Wi-Fi 동글 기능을 켠다(보호 모드를 넣음). 차주가 꺼 두었으면
+# (dongle.off) 켜지 않는다. 실패해도 설치는 이어 간다(나중에 조작 USB의 kp-dongle-on으로 켤 수 있다).
+if [ ! -f $BK/dongle.off ] && { [ -f $BK/wifi.nopart ] || [ "$(cat $BK/wifi.modver 2>/dev/null)" = 3 ]; }; then
+  /system/bin/sh /data/nemesis/apps/korea.projection/bin/dongle-ctl.sh on 2>&1 | while IFS= read -r _l; do echo "동글: $_l"; done
+fi
 if ! install_app; then
   m="Korea Projection: 상태 화면 앱을 설치하지 못했습니다(Launch를 누르면 다시 시도). 무선 카플레이 설정은 따로 진행됩니다."
   notice "$m"
