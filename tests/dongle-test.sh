@@ -101,11 +101,73 @@ fresh
 run 'dongle_up; dongle_down'; check "dongle_down: 드라이버를 내림" '[ $? = 0 ] && [ $(calls rmmod) = 1 ] && [ ! -s $T/modules ]'
 run 'dongle_down'; check "올라와 있지 않으면 rmmod를 부르지 않음" '[ $? = 0 ] && [ $(calls rmmod) = 1 ]'
 
-# --- 보호 모드 조건 ---
+# --- 켜기·끄기 조건(서비스) ---
+fresh; : > $T/bk/dongle.off
+run 'dongle_up'; check "끔 표시가 있으면 올리지 않음" '[ $? = 1 ] && [ $(calls insmod) = 0 ] && grep -q "꺼 둠" $T/out'
 fresh; rm -rf $T/hmg/mods/kp-dongle-aa-guard
 run 'dongle_up'; check "보호 모드가 없으면 올리지 않음" '[ $? = 1 ] && [ $(calls insmod) = 0 ] && grep -q "보호 모드" $T/out'
 fresh; : > $T/hmg/mods/kp-dongle-aa-guard/.disabled
-run 'dongle_up'; check "보호 모드가 꺼져 있으면 올리지 않음" '[ $? = 1 ] && [ $(calls insmod) = 0 ]'
+run 'dongle_up'; check "보호 모드가 꺼져 있으면(HMG-API 앱) 올리지 않음" '[ $? = 1 ] && [ $(calls insmod) = 0 ]'
+fresh
+run 'dongle_up; stop_ap() { echo STOPAP; }; dongle_off_tick; echo T1; : > $BK/dongle.off; dongle_off_tick'
+check "켜져 있으면 점검이 아무것도 안 함, 끄면 핫스팟을 멈추고 드라이버를 내림" '[ "$(sed -n "/T1/,\$p" $T/out | grep -c STOPAP)" = 1 ] && ! sed -n "1,/T1/p" $T/out | grep -q STOPAP && [ $(calls rmmod) = 1 ] && [ ! -s $T/modules ]'
+fresh
+run 'dongle_up; stop_ap() { :; }; : > $HMGDATA/mods/kp-dongle-aa-guard/.disabled; dongle_off_tick'
+check "HMG-API 앱에서 보호 모드를 끄면 드라이버를 내림" '[ $(calls rmmod) = 1 ]'
 
-echo; [ $fails = 0 ] && echo "모두 통과" || echo "실패 $fails개"
+# --- bin/dongle-ctl.sh ---
+cat > $T/bin/hmgapid <<E
+#!/bin/sh
+echo "hmgapid \$*" >> $T/calls
+G=$T/hmg/mods/kp-dongle-aa-guard
+case "\$1 \$2" in
+  "ping "*) exit 0 ;;
+  "enable "*) rm -f $T/hmg/mods/\$2/.disabled; echo enabled ;;
+  "disable "*) : > $T/hmg/mods/\$2/.disabled; echo disabled ;;
+  "engine install") mkdir -p \$G; echo '{}' > \$G/mod.json; echo installed ;;
+  "engine plan") cat $T/plan 2>/dev/null || echo "nothing to do" ;;
+  "engine apply") echo applied ;;
+  "engine remove") rm -rf $T/hmg/mods/\$3; echo removed ;;
+esac
+exit 0
+E
+chmod +x $T/bin/hmgapid
+ctl() {
+  PATH=$T/bin:$PATH HOTSPOT_LIB=1 APP=$T/app BB=$T/bin/bb BB_OK=1 BK=$T/bk W=$T/w WLAN=$T/net/wlan0 USBDEV=$T/usb \
+    MODULES=$T/modules PROCVER=$T/procver BOOT_ID=$T/bootid HMGDATA=$T/hmg NOTICE=$T/notice UPTIME=$T/uptime \
+    INSMOD=$T/bin/insmod RMMOD=$T/bin/rmmod CONF=$T/hostapd.conf KP_HOTSPOT=$T/hs.sh \
+    sh $PKG/bin/dongle-ctl.sh "$@" > $T/out 2>&1
+}
+sed "s#^export PATH=.*#export PATH=$T/bin:/usr/bin:/bin:/sbin#" $PKG/svc/hotspot.sh > $T/hs.sh
+# 가짜 hotspot 라이브러리 위에서 dongle-ctl이 쓰는 함수를 맞춘다(has_bb·stop_ours는 진짜를 쓰되 ps는 빈 결과)
+fresh; rm -rf $T/hmg/mods/kp-dongle-aa-guard; echo zip > $T/app/dongle/kp-dongle-aa-guard.zip
+ctl on; rc=$?
+check "on: 보호 모드가 없으면 넣고 재부팅 안내" '[ $rc = 0 ] && [ -f $T/hmg/mods/kp-dongle-aa-guard/mod.json ] && grep -q "재부팅" $T/out && grep -q "engine install" $T/calls'
+fresh; rm -rf $T/hmg/mods/kp-dongle-aa-guard; echo zip > $T/app/dongle/kp-dongle-aa-guard.zip; printf "change   /system/build.prop [x]\n" > $T/plan
+ctl on; rc=$?
+check "on: 계획에 파일 변경이 있으면 적용하지 않고 보호 모드를 다시 뺌" '[ $rc = 1 ] && [ ! -d $T/hmg/mods/kp-dongle-aa-guard ] && ! grep -q "engine apply" $T/calls'
+rm -f $T/plan
+fresh; : > $T/bk/dongle.off; : > $T/bk/dongle.blocked; echo 2 > $T/bk/dongle.crashes; : > $T/hmg/mods/kp-dongle-aa-guard/.disabled
+ctl on; rc=$?
+check "on: 끔 표시·막힘 기록을 지우고 꺼진 보호 모드를 켬" '[ $rc = 0 ] && [ ! -f $T/bk/dongle.off ] && [ ! -f $T/bk/dongle.blocked ] && [ ! -f $T/bk/dongle.crashes ] && [ ! -f $T/hmg/mods/kp-dongle-aa-guard/.disabled ]'
+fresh; ctl off; rc=$?
+check "off: 끔 표시를 남기고 보호 모드를 끔" '[ $rc = 0 ] && [ -f $T/bk/dongle.off ] && [ -f $T/hmg/mods/kp-dongle-aa-guard/.disabled ] && grep -q "동글 기능: 꺼짐" $T/out'
+fresh; run 'dongle_up'; ctl off
+check "off: 올라와 있던 드라이버를 내림" '[ $(calls rmmod) = 1 ] && [ ! -s $T/modules ]'
+fresh; run 'dongle_up'; : > $T/bk/mod.ours; mkdir -p $T/hmg/mods/wireless-carplay-aa; echo '{"system":[{"region": "KOR"}]}' > $T/hmg/mods/wireless-carplay-aa/mod.json
+printf "restore  /system/etc/permissions/x.xml (stock)\n" > $T/plan
+ctl remove; rc=$?
+check "remove: 드라이버·보호 모드·우리가 넣은 무선 모드·우리 칩 기록·동글 기록을 되돌림" '[ $rc = 0 ] && [ $(calls rmmod) = 1 ] && [ ! -d $T/hmg/mods/kp-dongle-aa-guard ] && [ ! -d $T/hmg/mods/wireless-carplay-aa ] && [ ! -f $T/bk/mod.ours ] && [ ! -f $T/hmg/public/wifi-chip ] && [ ! -f $T/bk/wifi-chip.ours ] && [ ! -f $T/bk/dongle.trying ] && [ ! -f $T/bk/dongle.off ]'
+rm -f $T/plan
+fresh; mkdir -p $T/hmg/mods/wireless-carplay-aa; echo '{"system":[{"region": "KOR"}]}' > $T/hmg/mods/wireless-carplay-aa/mod.json; : > $T/hmg/public/wifi-chip
+ctl remove; rc=$?
+check "remove: 우리가 넣지 않은 무선 모드·원래 있던 칩 기록은 그대로 둠" '[ $rc = 0 ] && [ -d $T/hmg/mods/wireless-carplay-aa ] && [ -f $T/hmg/public/wifi-chip ]'
+fresh; : > $T/bk/mod.ours; mkdir -p $T/hmg/mods/wireless-carplay-aa; echo '{"system":[{"region": "KOR"}]}' > $T/hmg/mods/wireless-carplay-aa/mod.json
+printf "change   /system/x [other]\n" > $T/plan
+ctl remove; rc=$?
+check "remove: 무선 모드 계획에 다른 변경이 있으면 적용하지 않고 실패로 알림, 동글 기능은 꺼 둠" '[ $rc = 1 ] && [ -f $T/bk/dongle.off ] && ! grep -q "engine apply" $T/calls && grep -q "적용해 주세요" $T/out'
+rm -f $T/plan
+fresh; ctl status; check "status: 상태 줄" 'grep -q "보호 모드(kp-dongle-aa-guard): 켜짐" $T/out && grep -q "동글 꽂힘: 예" $T/out'
+
+cp $T/out /tmp/kp-last-out; echo; [ $fails = 0 ] && echo "모두 통과" || echo "실패 $fails개"
 exit $fails
