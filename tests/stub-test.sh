@@ -1537,7 +1537,7 @@ check "  쏘나타·자동 시험 차: 모드가 적용되면(persist.sys.iap2.w
 : > $X/hd/mods/wireless-carplay-aa/.disabled
 check "  쏘나타: 모드를 꺼 두었으면 대기" '! tr_ DN822HEV.KOR.0000.V039.001.260902'
 rm -f $T/iap2
-check "서비스: 시험 지원 차 대기 반복은 try_ready로 끝남 (1분마다, 1.7.3: 30초 대기 두 번 사이마다 제보 요청 점검)" 'grep -q "while ! try_ready \"\$prod\"; do sleep 30 & wait \$!; req_tick; sleep 30 & wait \$!; req_tick; done" $T/app/svc/hotspot.sh'
+check "서비스: 시험 지원 차 대기 반복은 try_ready로 끝남 (1분마다, 1.7.3: 30초 대기 두 번 사이마다 제보 요청 점검)" 'grep -q "while ! try_ready \"\$prod\"; do sleep 30 & wait \$!; req_tick; \[ -d \$WLAN \] || dongle_up; sleep 30 & wait \$!; req_tick; done" $T/app/svc/hotspot.sh'
 
 # --- 1.5.5: Wi-Fi 잠금 (설정 파일 root 소유 + crc32 치움, 니로에서 검증된 상태) ---
 WF=$T/wf; mkdir -p $WF/bin
@@ -2525,7 +2525,7 @@ check "  요청이 없거나(또는 읽지 못하면) 아무것도 안 하고 0"
 mkreq; SVAPP=$T/nope svreq > $T/svreq.out 2>/dev/null
 check "  status.sh가 없어도 0(서비스 반복이 멈추지 않음, mode=restart)" 'grep -qx "rc=0" $T/svreq.out && ! grep -q "요청을 받음" $T/svreq.out'
 rm -f $T/report.req
-check "  req_tick은 30초마다: 우리 핫스팟 회차, 순정 AP 회차(60초 회차 안에서 두 번), 모드 대기·다른 hostapd 대기 회차" '[ "$(grep -c "^ *req_tick$" $PKG/svc/hotspot.sh)" = 3 ] && grep -q "while ! try_ready \"\$prod\"; do sleep 30 & wait \$!; req_tick; sleep 30 & wait \$!; req_tick; done" $PKG/svc/hotspot.sh && [ "$(grep -c "sleep 30 & wait \$!; req_tick$" $PKG/svc/hotspot.sh)" = 2 ] && awk "/^req_tick\(\) \{/,/^}/" $PKG/svc/hotspot.sh | grep -q "return 0"'
+check "  req_tick은 30초마다: 우리 핫스팟 회차, 순정 AP 회차(60초 회차 안에서 두 번), 모드 대기·다른 hostapd 대기 회차" '[ "$(grep -c "^ *req_tick$" $PKG/svc/hotspot.sh)" = 3 ] && grep -q "while ! try_ready \"\$prod\"; do sleep 30 & wait \$!; req_tick; \[ -d \$WLAN \] || dongle_up; sleep 30 & wait \$!; req_tick; done" $PKG/svc/hotspot.sh && [ "$(grep -c "sleep 30 & wait \$!; req_tick$" $PKG/svc/hotspot.sh)" = 2 ] && awk "/^req_tick\(\) \{/,/^}/" $PKG/svc/hotspot.sh | grep -q "return 0"'
 check "  1.7.3 리뷰 L1: 우리 핫스팟 30초 회차에서 req_tick이 ap_yield보다 먼저(다른 hostapd에 비켜 주는 동안에도 제보 요청을 봄)" '[ "$(awk "/^main\(\) \{/,/^}/" $PKG/svc/hotspot.sh | grep -n -E "^    req_tick$|^    ap_yield && continue$" | cut -d: -f2 | tr -d " " | tr "\n" ,)" = "req_tick,ap_yield&&continue," ]'
 K6L1=$(HOTSPOT_LIB=1 BB=$T/bin/bb W=$T/w sh -c '. '$T'/app/svc/hotspot.sh; sleep() { :; }; k=0; req_tick() { k=$((k+1)); [ $k -ge 3 ] && { echo ticks=$k; exit 0; }; }; idle_req' 2>&1)
 check "  1.7.3 리뷰 L1: 무선 설정 없이 대기하는 차(idle_req)도 30초마다 req_tick을 부름(대기는 끝나지 않음)" '[ "$K6L1" = ticks=3 ] && grep -q "^idle_req() { while true; do sleep 30 & wait \$!; req_tick; done; }$" $PKG/svc/hotspot.sh'

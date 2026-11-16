@@ -101,6 +101,14 @@ fresh
 run 'dongle_up; dongle_down'; check "dongle_down: 드라이버를 내림" '[ $? = 0 ] && [ $(calls rmmod) = 1 ] && [ ! -s $T/modules ]'
 run 'dongle_down'; check "올라와 있지 않으면 rmmod를 부르지 않음" '[ $? = 0 ] && [ $(calls rmmod) = 1 ]'
 
+# --- 다시 꽂기 ---
+fresh; echo 3 > $T/usb/1-1/devnum; : > $T/insmod_fails
+run 'dongle_up; dongle_up; echo 4 > $USBDEV/1-1/devnum; rm -f '$T'/insmod_fails; dongle_up; exit $?'; rc=$?
+check "insmod 실패 뒤 같은 동글은 다시 안 올리고, 뺐다 꽂으면(장치 번호 바뀜) 다시 올림" '[ $rc = 0 ] && [ $(calls insmod) = 2 ] && [ -d $T/net/wlan0 ]'
+fresh; : > $T/no_wlan
+run 'dongle_up; mkdir -p $WLAN; dongle_up; exit $?'; rc=$?
+check "드라이버는 올라왔는데 wlan0이 없던 동글을 다시 꽂아 wlan0이 생기면 칩 기록을 만듦" '[ $rc = 0 ] && [ $(calls insmod) = 1 ] && [ -f $T/hmg/public/wifi-chip ] && [ -f $T/bk/wifi-chip.ours ]'
+
 # --- 켜기·끄기 조건(서비스) ---
 fresh; : > $T/bk/dongle.off
 run 'dongle_up'; check "끔 표시가 있으면 올리지 않음" '[ $? = 1 ] && [ $(calls insmod) = 0 ] && grep -q "꺼 둠" $T/out'

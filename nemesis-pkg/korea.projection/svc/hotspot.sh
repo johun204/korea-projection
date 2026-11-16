@@ -1669,7 +1669,7 @@ dongle_plugged() {
   for _dd in $USBDEV/*; do
     [ -f $_dd/idVendor ] && [ -f $_dd/idProduct ] || continue
     read _dv < $_dd/idVendor; read _dq < $_dd/idProduct
-    case " $DONGLE_IDS " in *" $_dv:$_dq "*) return 0 ;; esac
+    case " $DONGLE_IDS " in *" $_dv:$_dq "*) _dn=; [ -f $_dd/devnum ] && read _dn < $_dd/devnum; DONGLE_DEV="${_dd##*/}#${_dn}"; return 0 ;; esac
   done
   return 1
 }
@@ -1693,11 +1693,13 @@ dongle_chip_mark() {
 # 동글 드라이버를 올린다. 0: 동글의 wlan0이 있음, 1: 없음(동글 없음·올리지 않음·실패)
 dongle_up() {
   [ -f $DONGLE_D/88x2bu.ko ] || return 1
-  if dongle_loaded; then [ -d $WLAN ]; return $?; fi
+  # 이미 올라와 있으면: 동글을 다시 꽂아 드라이버가 새로 잡은 경우에도 칩 기록을 만든다
+  if dongle_loaded; then [ -d $WLAN ] || return 1; dongle_chip_mark; return 0; fi
   # 내장 칩의 wlan0이 있는 차는 동글을 쓰지 않는다
   [ -d $WLAN ] && return 1
-  [ "$DONGLE_FAILED" = 1 ] && return 1
   dongle_plugged || return 1
+  # 이번 실행에 이 동글(같은 장치 번호)로 실패했으면 다시 하지 않는다. 뺐다 꽂으면 번호가 바뀌어 다시 시도한다
+  [ -n "$DONGLE_FAILED" ] && [ "$DONGLE_FAILED" = "$DONGLE_DEV" ] && return 1
   if [ -f $BK/dongle.off ]; then
     dongle_say off "USB Wi-Fi 동글: 꺼 둠(dongle.off): 올리지 않음"
     return 1
@@ -1733,7 +1735,7 @@ dongle_up() {
   while [ ! -d $WLAN ] && [ $_di -lt 20 ]; do sleep 1; _di=$((_di+1)); done
   if [ ! -d $WLAN ]; then
     # 내비가 멈춘 것이 아니므로 구간을 닫는다. 이번 실행에서는 다시 올리지 않는다(30초마다 되풀이하지 않게).
-    DONGLE_FAILED=1; dongle_close
+    DONGLE_FAILED=$DONGLE_DEV; dongle_close
     log "USB Wi-Fi 동글: 드라이버를 올렸지만 wlan0이 안 생김(insmod 종료 코드 $_dr: $($BB tr '\n' ' ' < $W/dongle-insmod.txt 2>/dev/null))"
     return 1
   fi
@@ -2744,7 +2746,7 @@ main() {
       notice "Korea Projection: 무선 카플레이를 설정하는 중입니다. 약 5분 동안 내비를 재부팅하거나 끄지 마세요."
     fi
     # 1.7.3(R-4): 모드를 기다리는 차도 제보 요청은 30초마다 본다(모드 확인은 지금처럼 1분마다)
-    while ! try_ready "$prod"; do sleep 30 & wait $!; req_tick; sleep 30 & wait $!; req_tick; done
+    while ! try_ready "$prod"; do sleep 30 & wait $!; req_tick; [ -d $WLAN ] || dongle_up; sleep 30 & wait $!; req_tick; done
     log "무선 모드 확인됨: 시작"
   fi
   parse_conf $SRC
