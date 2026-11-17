@@ -1752,6 +1752,26 @@ dongle_ap_begin() {
   kp_up; DONGLE_AP_AT=${_U:-0}
   : > $W/dongle.ap; dongle_open
 }
+# 부팅 중(Android가 다 뜨기 전) 동글 핫스팟. 순정 안드로이드 오토(GPM)는 부팅 완료 때 시작해 블루투스로 붙은 폰과
+# 무선 협상을 하는데, 그때 AP 신호($AAPROP)가 0이면 폰이 그 연결에서 무선을 포기한다(블루투스를 다시 붙여야 다시 묻는다,
+# 2026-11-17 K8 GL3 차주 확인). 그래서 설정이 다 끝난 차(무선 모드 적용·보호 모드 켜짐·동글 꽂힘·softap.conf 읽힘)는
+# 부팅 완료를 기다리지 않고 먼저 켠다. 커널·/system 프로그램(insmod·hostapd·dnsmasq)과 속성만 쓴다(Android 서비스 불필요).
+# 부팅 완료 뒤의 흐름은 이 핫스팟을 끄지 않고 그대로 쓴다(DONGLE_EARLY). 하나라도 안 맞으면 아무것도 하지 않는다(예전 흐름).
+dongle_early() {
+  has_bb || return 1
+  [ -f $DONGLE_D/88x2bu.ko ] && [ ! -f $AAOFF ] || return 1
+  car_in "$1" "$CARS" && setup_done && dongle_wanted && dongle_plugged || return 1
+  parse_conf $SRC
+  [ "${NS:-0}" -ge 4 ] && [ ${#S2} -ge 1 ] && [ ${#S4} -ge 8 ] || return 1
+  dongle_up || return 1
+  write_conf
+  up
+  aa_sig
+  running "hostapd $CONF" || return 1
+  DONGLE_EARLY=1
+  log "USB Wi-Fi 동글: 부팅 완료 전에 핫스팟을 켬"
+  return 0
+}
 # 30초 점검: 동글로 켠 hostapd가 DONGLE_AP_OK초 넘게 살아 있으면 구간을 닫고 재시작 횟수를 지운다
 dongle_settle() {
   [ -n "$DONGLE_AP_AT" ] && [ -f $W/dongle.ap ] || return 0
@@ -2714,6 +2734,8 @@ main() {
   # 상태 화면 안내 파일은 서비스만 쓴다: 지난 실행의 안내를 비운다
   HINT_ON=1; HA_READY=; HA=; HA_T=; HI=; HI_T=; HC=; HC_T=; hint_write
   prod=$(getprop ro.build.product)
+  # 포크: 설정이 끝난 동글 차는 부팅 완료 전에 핫스팟부터 켠다(무선 안드로이드 오토 협상 전에 AP가 있어야 함)
+  [ "$(getprop sys.boot_completed)" = 1 ] || dongle_early "$prod"
   # svc, pm, HMG-API는 Android가 다 켜진 뒤에 쓴다
   while [ "$(getprop sys.boot_completed)" != 1 ]; do sleep 2; done
   # 시계가 맞춰진 뒤의 시각으로 다시 잡는다(경과 시간)
@@ -2770,7 +2792,8 @@ main() {
       rm -f $BK/stockap.seen $BK/stockap.miss
       log "순정 카플레이 AP를 ${STOCK_MISS_MAX}번의 부팅 동안 못 봄: 기록(stockap.seen)을 지우고 보통 흐름으로 돌아감"
     fi
-    if [ "$BB" = "$BB_OWN" ] && [ ! -f $BK/stockap.seen ] && ! stock_ap_on; then
+    # 포크: 동글의 wlan0이면 기다리지 않는다(부품 없는 차라 순정 AP가 뜰 수 없다)
+    if [ "$BB" = "$BB_OWN" ] && [ ! -f $BK/stockap.seen ] && ! stock_ap_on && ! dongle_on; then
       log "순정 카플레이 AP를 최대 ${STOCK_GRACE}초 기다림(busybox 없는 내비)"
       _g=0
       while [ $_g -lt $STOCK_GRACE ] && ! stock_ap_on; do sleep 10 & wait $!; _g=$((_g+10)); done
@@ -2799,9 +2822,14 @@ main() {
     fi
   fi
   log "시작 ($prod): softap.conf의 카플레이 SSID 길이 ${#S2}, 비밀번호 길이 ${#S4}"
+  if [ "$DONGLE_EARLY" = 1 ] && dongle_on && running "hostapd $CONF"; then
+    # 포크: 부팅 중에 켠 동글 핫스팟은 끄지 않는다(끄면 AP 신호가 잠깐 0이 되어 그 사이 협상이 실패할 수 있다)
+    log "USB Wi-Fi 동글: 부팅 중에 켠 핫스팟을 그대로 씀"
+  else
   stop_ap
   # Wi-Fi 드라이버는 Wi-Fi를 켜야 올라오고, hostapd가 wlan0을 쓰려면 wpa_supplicant가 놓아야 한다(잠금 포함)
   take_wlan0
+  fi
   logstart
   up
   aa_sig
