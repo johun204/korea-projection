@@ -24,7 +24,25 @@ for f in $PKG/svc/hotspot.sh $PKG/scripts/post.sh $PKG/scripts/preun.sh $PKG/bin
 done
 
 mkdir -p $T/bin $T/app $T/w $T/apps $T/d $T/usb0/packages $T/logs
-printf '#!/bin/sh\nexec "$@"\n' > $T/bin/bb
+# 1.7.4(L-6): 없는 명령(맥에 없는 chown 등)은 오류 줄 없이 127로 실패한다(차의 busybox에 그 기능이 없는 것과 같은 결과, 잡음만 없앰)
+# 1.7.4(B-15, 리뷰로 좁힘): 차의 busybox 1.8.1 grep에서 확실한 옵션(l n q v s c i H h e f L A B C E)만 받는다(w o r m a I F는 확실하지 않아 뺌). 그 밖의 글자(-x 등)나
+# 긴 옵션(--…)이면 아무것도 내지 않고 2로 끝난다(1.8.1에서 안 되는 꼴이 PC 시험에서 통과하지 않게). 옵션은 첫 비옵션 인자 앞까지만 본다
+cat > $T/bin/bb <<'BBE'
+#!/bin/sh
+command -v "$1" >/dev/null 2>&1 || exit 127
+if [ "$1" = grep ]; then
+  for _o in "$@"; do
+    [ "$_o" = grep ] && continue
+    case "$_o" in
+      --) break ;;
+      --*) exit 2 ;;
+      -*) _r=${_o#-}; case "$_r" in *[!lnqvsciHhefLABCE0-9]*) exit 2 ;; esac ;;
+      *) break ;;
+    esac
+  done
+fi
+exec "$@"
+BBE
 cat > $T/bin/getprop <<E
 #!/bin/sh
 case "\$1" in
@@ -212,18 +230,46 @@ open('%s/c%02d'%(d,len(cases)+1),'wb').write(full[:4+2+13+1])
 open('%s/c%02d'%(d,len(cases)+2),'wb').write(full[:4])
 E
 pk() { HOTSPOT_LIB=1 BB=$T/bin/bb SRC=$1 W=$T/w ${PKSH:-sh} -c '. '$T'/app/svc/hotspot.sh; '"$2"'parse_conf $SRC; printf "%s\n" "$NS" "$S1" "$S2" "$S3" "$S4" "$S5" "auth=$(conf_auth $SRC)"'; }
+# 1.7.4(B-6): 한글(UTF-8)이 든 c01·c04는 1번째·3번째 문자열의 한글을 이제 읽으므로 예전과 다르다(아래에서 따로 봄). 나머지 9개는 그대로 같아야 한다
 PKN=0; PKD=0
-for f in $PK/c??; do pk $f '' > $f.new; pk $f '. '$T'/ref-parse.sh; ' > $f.old; PKN=$((PKN+1)); cmp -s $f.new $f.old && PKD=$((PKD+1)); done
-check "  4b K-3: 특수 글자·0x00·0xff·줄바꿈·길이 63/64·잘린 softap.conf $PKN개 — parse_conf·conf_auth 결과가 고치기 전과 바이트까지 같음(sh)" '[ $PKN = 11 ] && [ $PKD = $PKN ]'
+for f in $PK/c??; do pk $f '' > $f.new; pk $f '. '$T'/ref-parse.sh; ' > $f.old; PKN=$((PKN+1)); case $f in *c01|*c04) continue ;; esac; cmp -s $f.new $f.old && PKD=$((PKD+1)); done
+check "  4b K-3: 특수 글자·0x00·0xff·줄바꿈·길이 63/64·잘린 softap.conf $PKN개(한글 2개 빼고 $PKD개) — parse_conf·conf_auth 결과가 고치기 전과 바이트까지 같음(sh)" '[ $PKN = 11 ] && [ $PKD = 9 ]'
 # 4b 리뷰 L-2: 차와 같은 ksh 계열(mksh 등)로도 같은 비교
 for PKSH in $KSHS; do
   PKN=0; PKD=0
-  for f in $PK/c??; do pk $f '' > $f.kn; pk $f '. '$T'/ref-parse.sh; ' > $f.ko; PKN=$((PKN+1)); cmp -s $f.kn $f.ko && cmp -s $f.kn $f.new && PKD=$((PKD+1)); done
-  check "  4b 리뷰 L-2: $(basename $PKSH)로도 $PKN개 모두 고치기 전과 같고 sh 결과와도 같음" '[ $PKN = 11 ] && [ $PKD = $PKN ]'
+  for f in $PK/c??; do pk $f '' > $f.kn; pk $f '. '$T'/ref-parse.sh; ' > $f.ko; PKN=$((PKN+1)); case $f in *c01|*c04) cmp -s $f.kn $f.new && PKD=$((PKD+1)); continue ;; esac; cmp -s $f.kn $f.ko && cmp -s $f.kn $f.new && PKD=$((PKD+1)); done
+  check "  4b 리뷰 L-2: $(basename $PKSH)로도 $PKN개 모두 sh 결과와 같고, 한글 2개 말고는 고치기 전과도 같음" '[ $PKN = 11 ] && [ $PKD = $PKN ]'
 done; unset PKSH
 check "  4b 리뷰 L-2: 잘린·깨진 파일도 헛돌지 않음(4바이트뿐이면 NS=0, 둘째 문자열 중간에서 끊기면 첫 문자열만)" '[ "$(head -1 $PK/c10.new)" = 0 ] && [ "$(sed -n 1,2p $PK/c08.new | tr "\n" "|")" = "1|Trunc %d SSID|" ]'
 check "  4b K-3: 비교가 헛돌지 않음(ASCII 문자열은 실제로 읽힘: % 와 \\ 가 그대로, conf_auth 숫자 나옴)" 'grep -qx "My Car %d 50%" $PK/c00.new && grep -qx "a\\\\b\\\\\\\\c %s" $PK/c00.new && grep -qx "CP %s%n%%" $PK/c00.old && grep -q "^auth=[0-9]" $PK/c00.new'
-check "  4b K-3: 한글(UTF-8) 문자열은 예전처럼 문자열로 읽지 않음(32~126 밖) — 고치기 전과 같은 NS" '[ "$(head -1 $PK/c01.new)" = "$(head -1 $PK/c01.old)" ]'
+# 1.7.4(B-6): c01은 카플레이 SSID(2번째)가 한글이라 예전처럼 읽지 못하고(4개 못 채움), 1번째 한글 이름만 이제 읽힘.
+# c04는 1·2·3번째를 읽고 4번째(카플레이 비밀번호)가 한글이라 3개에서 멈춤
+check "  1.7.4 B-6: 견본 c01·c04 — 1번째 한글 이름은 읽고, hostapd에 들어가는 2·4번째의 한글은 예전처럼 읽지 않음(4개를 못 채움)" '[ "$(sed -n 1,2p $PK/c01.new | tr "\n" "|")" = "3|니로 카플|" ] && [ "$(sed -n 1,4p $PK/c04.new | tr "\n" "|")" = "3|한글SSID%|ok%1\$s|s|" ] && [ "$(head -1 $PK/c01.old)" -lt 3 ]'
+# 1.7.4(B-6): 실제 순정 형식(버전, S1, S2, 키 관리 int, S3, S4, 채널 int 둘, bool, 빈 vendorSpecific, apMode)으로 만든 견본
+python3 - $PK <<'E2'
+import struct,sys
+d=sys.argv[1]
+u=lambda b:struct.pack('>H',len(b))+b
+I=lambda n:struct.pack('>i',n)
+def real(s1,s2,s3,s4): return I(3)+u(s1)+u(s2)+I(4)+u(s3)+u(s4)+I(149)+I(1)+b'\x00'+u(b'')+I(2)
+open(d+'/k1','wb').write(real('내 차 핫스팟'.encode(),b'KP-CarPlay1',b'12345678',b'abcdEFGH1234'))
+open(d+'/k2','wb').write(real('니로'.encode(),b'CP_A1','암호'.encode()+b'1234',b'pw12345678ab'))
+open(d+'/k3','wb').write(real('\U0001F697car'.encode('utf-8'),b'CP_B2',b'x',b'pw12345678ab'))
+open(d+'/k4','wb').write(real(b'MyCar',b'CP_C3',b'x',b'pw12345678ab'))
+open(d+'/k5','wb').write(real(b'bad\xea\x80',b'CP_D4',b'x',b'pw12345678ab'))
+open(d+'/k6','wb').write(real(b'MyCar','카플'.encode(),b'x',b'pw12345678ab'))
+open(d+'/k7','wb').write(real(b'bad\xc0\x80x',b'CP_E5',b'x',b'pw12345678ab'))
+E2
+for f in k1 k2 k3 k4 k5 k6 k7; do pk $PK/$f '' | tr '\n' '|' > $PK/$f.new; pk $PK/$f '. '$T'/ref-parse.sh; ' | tr '\n' '|' > $PK/$f.old; done
+check "1.7.4 B-6: 순정 일반 핫스팟 이름이 한글이면 1.7.3까지는 문자열 3개(서비스 시작 안 함), 이제 4개이고 카플레이 SSID·비밀번호가 제자리" '[ "$(cut -d"|" -f1 $PK/k1.old)" = 3 ] && [ "$(cat $PK/k1.new)" = "4|내 차 핫스팟|KP-CarPlay1|12345678|abcdEFGH1234||auth=4|" ]'
+check "  B-6: 한글 이름·한글 섞인 일반 핫스팟 비밀번호(3번째)도 4개, 4바이트 글자(이모지) 이름도 4개" '[ "$(cat $PK/k2.new)" = "4|니로|CP_A1|암호1234|pw12345678ab||auth=4|" ] && [ "$(cut -d"|" -f1-3 $PK/k3.new)" = "4|🚗car|CP_B2" ]'
+check "  B-6: 영문 이름 파일은 예전과 바이트까지 같음" 'cmp -s $PK/k4.new $PK/k4.old && [ "$(cut -d"|" -f1 $PK/k4.new)" = 4 ]'
+check "  B-6: 끝이 잘린 UTF-8(EA 80)·C0 80은 예전처럼 문자열로 보지 않음(결과가 예전과 같음)" 'cmp -s $PK/k5.new $PK/k5.old && cmp -s $PK/k7.new $PK/k7.old'
+check "  B-6: hostapd에 들어가는 카플레이 SSID(2번째)가 한글이면 예전처럼 받지 않음(결과가 예전과 같고 4개 못 채움)" 'cmp -s $PK/k6.new $PK/k6.old && [ "$(cut -d"|" -f1 $PK/k6.new)" -lt 4 ]'
+for PKSH in $KSHS; do
+  PKD=0; for f in k1 k2 k3 k4 k5 k6 k7; do [ "$(pk $PK/$f '' | tr '\n' '|')" = "$(cat $PK/$f.new)" ] && PKD=$((PKD+1)); done
+  check "  B-6: $(basename $PKSH)로도 견본 7개 결과가 sh와 같음" '[ $PKD = 7 ]'
+done; unset PKSH
 
 # --- 1b. hotspot.sh fix_perms: HMG-API 기록과 같은 권한 파일 되돌리기 (11-06 차의 engine status 줄 그대로) ---
 mkdir -p $T/fp/bin $T/fp/perms $T/fp/w
@@ -267,10 +313,11 @@ check "  /system이 ro였으면 rw → ro로 되돌림" 'grep -q "remount rw" $T
 check "  1.7.2 P-14: 새로 쓴 권한 파일 이름 2개를 삭제용 기록(perms.ours)에 남김(md5가 다른 것은 없음)" '[ "$(sort $T/fp/bk/perms.ours | tr "\n" " ")" = "com.hkmc.software.connectivity.androidauto_wireless com.hkmc.software.connectivity.carplay_wireless " ]'
 rm -f $T/fp/perms/com.hkmc.software.connectivity.carplay_wireless.xml; fp > $T/fp/out
 check "    다시 써도 기록에 같은 이름을 겹쳐 적지 않음" '[ "$(wc -l < $T/fp/bk/perms.ours | tr -d " ")" = 2 ]'
-rm -f $T/fp/bk/perms.ours; printf '%s\n' "11-06 04:10:00 권한 파일 되돌림: com.hkmc.software.connectivity.carplay_wireless" "11-06 04:10:01 권한 파일 되돌림: bad/../x" > $T/fp/ap.log; fp > $T/fp/out; rm -f $T/fp/ap.log
-check "    1.7.1까지 설치한 차: 기록이 없으면 서비스 시작 때 ap.log의 이름을 기록으로 옮김(이상한 이름은 버림, 리뷰 L5)" '[ "$(cat $T/fp/bk/perms.ours)" = com.hkmc.software.connectivity.carplay_wireless ]'
-rm -f $T/fp/bk/perms.ours; fp > $T/fp/out
-check "    옮길 것이 없어도 빈 기록을 만들어 다음 부팅에 다시 찾지 않음" '[ -f $T/fp/bk/perms.ours ] && [ ! -s $T/fp/bk/perms.ours ]'
+# 1.7.4(L-2b): 서비스 쪽 perms_seed 호출을 지웠다(옛 시험 2개는 tests/legacy/removed-1.7.4.md). 서비스는 ap.log에서 옮기지 않고,
+# 삭제 때 perms_revert가 함수(perms_seed)로 찾는다(아래 삭제 시험)
+# (옛 시험과 같은 준비: 권한 파일은 이미 되돌려져 있고 기록만 없음, ap.log에 1.7.1 꼴 줄. 1.7.3은 이 이름을 기록으로 옮겼다)
+rm -f $T/fp/bk/perms.ours $T/fp/calls; printf '%s\n' "11-06 04:10:00 권한 파일 되돌림: com.hkmc.software.connectivity.carplay_wireless" > $T/fp/ap.log; fp > $T/fp/out; rm -f $T/fp/ap.log
+check "    1.7.4 L-2b: 서비스 시작(_fix_perms가 실제로 돌아 HMG-API를 부름)은 ap.log의 옛 이름을 기록(perms.ours)으로 옮기지 않음" 'grep -q "^hmgapid " $T/fp/calls && ! grep -q "carplay_wireless" $T/fp/bk/perms.ours 2>/dev/null'
 fpreset; rm -f $T/fp/calls $T/fp/notice; fp > $T/fp/out
 rm -f $T/fp/calls $T/fp/notice; fp > $T/fp/out
 check "  파일이 이미 있으면 다시 쓰지도 apply하지도 않음" '! grep -q "engine apply" $T/fp/calls && [ ! -f $T/fp/notice ]'
@@ -312,6 +359,10 @@ we wifi_events > $WE/out2
 check "  같은 커널 로그는 다시 남기지 않음(어디까지 남겼는지 기억)" '[ ! -s $WE/out2 ] && grep -q "^boot-A 773.805" $WE/w/ktime'
 echo "<6>[  800.1] CFG80211-ERROR) wl_cfg80211_del_station : Disconnect STA : aa:bb:cc:dd:ee:ff" >> $WE/dmesg; we wifi_events > $WE/out3
 check "  새로 생긴 줄만 남김" '[ "$(grep -c "Wi-Fi: " $WE/out3)" = 1 ] && grep -q "커널 800초" $WE/out3'
+# 1.7.4(L-4): wifi_events·aa_events는 서비스가 읽어 둔 BID를 쓴다. BID가 있을 때와 없을 때 출력·기록이 바이트까지 같음
+rm -f $WE/w/ktime $WE/bk/ktime 2>/dev/null; we wifi_events > $WE/l4a; cp $WE/w/ktime $WE/l4a.k
+rm -f $WE/w/ktime $WE/bk/ktime 2>/dev/null; we 'BID=$(cat '$WE'/bootid); wifi_events' > $WE/l4b; cp $WE/w/ktime $WE/l4b.k
+check "  1.7.4 L-4: 부팅 id를 BID로 받아도(30초마다 cat 안 함) wifi_events 출력·기록(ktime)이 바이트까지 같음, aa_events도 BID를 씀(소스)" '[ "$(sed "s/^[0-9-]* [0-9:]* //" $WE/l4a)" = "$(sed "s/^[0-9-]* [0-9:]* //" $WE/l4b)" ] && cmp -s $WE/l4a.k $WE/l4b.k && [ -s $WE/l4a.k ] && [ "$(grep -c "_bid=\${BID:-\$(cat \${BOOT_ID:-/proc/sys/kernel/random/boot_id} 2>/dev/null)}; _bid=\${_bid:-none}" $PKG/svc/hotspot.sh)" = 2 ]'
 echo boot-B > $WE/bootid; printf '%s\n' "<6>[   30.5] CFG80211-ERROR) wl_notify_connect_status_ap : ** AP/GO Link up event **" > $WE/dmesg; we wifi_events > $WE/out4
 check "  재부팅하면(부팅 id가 다름) 커널 시각이 작아도 처음부터 남김" 'grep -q "Wi-Fi: AP 올라옴 (커널 30초)" $WE/out4'
 echo boot-C > $WE/bootid; printf '%s\n' "<6>[    5.8] IPv6: ADDRCONF(NETDEV_CHANGE): ncm0: link becomes ready" "<6>[  300.0] CFG80211-ERROR) wl_cfg80211_del_station : Disconnect STA : ff:ff:ff:ff:ff:ff scb_val.val 3" "<4>[  301.0] dhd_os_send_hang: HANG event sent" > $WE/dmesg; we wifi_events > $WE/out5
@@ -349,6 +400,12 @@ printf '%s\n' "11-10 09:00:00.100 I/HMG-API (  775): Android Auto: ready resend 
 printf '#!/bin/sh\ncat %s/aalog241\n' $WE > $WE/bin/logcat; chmod +x $WE/bin/logcat
 we aa_events > $WE/aa241
 check "1.7.3 모드 2.4.1: '준비 다시 보냄 N대'·'0대 (이미 연결됨)'·훅 줄을 ap.log에, MAC 꼴은 지움" 'grep -q "안드로이드 오토: 모드가 준비 다시 보냄 2대 (09:00:05.200)" $WE/aa241 && grep -q "안드로이드 오토: 모드가 준비 다시 보냄 0대 (이미 연결됨) (09:00:06.300)" $WE/aa241 && grep -q "안드로이드 오토: 모드의 준비 다시 보내기 훅 걸림(com.google.android.projection.sink) (09:00:00.100)" $WE/aa241 && ! grep -q "AA:BB" $WE/aa241'
+# 1.7.4(모드 2.4.2): 새 줄 두 가지. "신호 없음 60초"는 정상 줄로 표시하고, 판정(aa 안내)에는 쓰지 않음
+printf '%s\n' "11-10 09:01:00.100 I/HMG-API (  775): [wireless-carplay-aa] AA 준비 다시 보냄 신호 기다림 12초" "11-10 09:01:00.200 I/HMG-API (  775): [wireless-carplay-aa] AA 준비 다시 보냄 1대" "11-10 09:02:00.300 I/HMG-API (  775): [wireless-carplay-aa] AA 준비 다시 보냄 0대 (신호 없음 60초)" "11-10 09:02:01.400 I/HMG-API (  775): [wireless-carplay-aa] AA 준비 다시 보냄 못 함 (IllegalStateException)" > $WE/aalog242
+printf '#!/bin/sh\ncat %s/aalog242\n' $WE > $WE/bin/logcat; chmod +x $WE/bin/logcat; rm -f $WE/w/aatime $WE/hint
+we 'HINT_ON=1; aa_events' > $WE/aa242; printf '#!/bin/sh\ncat %s/aalog2\n' $WE > $WE/bin/logcat; chmod +x $WE/bin/logcat; rm -f $WE/w/aatime
+check "1.7.4 모드 2.4.2 줄: '신호 기다림 N초'는 '신호를 N초 기다린 뒤 다시 보냄', '0대 (신호 없음 60초)'는 정상 줄로 표시, 못 함은 그대로" 'grep -q "안드로이드 오토: 모드가 AA 신호를 12초 기다린 뒤 준비 다시 보냄 (09:01:00.100)" $WE/aa242 && grep -q "안드로이드 오토: 모드가 준비 다시 보냄 1대 (09:01:00.200)" $WE/aa242 && grep -q "안드로이드 오토: 모드: 60초 동안 AA 신호가 없어 준비 다시 보내기를 하지 않음(정상: AA를 쓰지 않아도 나옴) (09:02:00.300)" $WE/aa242 && grep -q "모드가 준비 다시 보냄 못 함 (IllegalStateException)" $WE/aa242 && ! grep -q "0대 (신호 없음" $WE/aa242'
+check "  모드 2.4.2 줄(소스 검사): '준비 다시 보냄' 갈래는 판정 표시(f)를 세우지 않음(연결됨·안 됨 판정에 안 씀)" 'awk "/index\(\\\$0, \"AA 준비 다시 보냄\"\) > 0\)/{f=1} f{print} f&&/^ *else e = /{exit}" $PKG/svc/hotspot.sh > $WE/rsb && [ -s $WE/rsb ] && ! grep -q "f = " $WE/rsb'
 # 확정 2.4.1: 모드 타이머 예외 줄(연결마다 한 번)을 ap.log에. 예외 이름만(영문·숫자·점)
 rm -f $WE/w/aatime
 printf '%s\n' "11-10 09:01:00.100 W/HMG-API (  775): [wireless-carplay-aa] AA: timer error java.lang.NullPointerException: x a1:b2:c3:d4:e5:f6" > $WE/aalogte
@@ -386,14 +443,15 @@ check "  IPv6 파일이 없는 커널에서도 IPv4는 셈" '[ "$(PROCNET=$WE/pn
 rm -rf $WE/pn/*
 check "  /proc/net 파일이 하나도 없으면 0(멈추지 않음)" '[ "$(PROCNET=$WE/pn we cp_count </dev/null)" = 0 ]'
 check "  리포트·상태 파일·알림·서비스 로그가 모두 cp_count를 씀(netstat으로 세는 곳이 남지 않음, status.sh는 K_CP 한 번으로 셈 — 4b K-3)" '! grep -n "netstat" $PKG/svc/hotspot.sh $PKG/bin/status.sh | grep -v "^[^:]*:[0-9]*:[[:space:]]*#" | grep -q . && [ "$(grep -c "cp_count)" $PKG/bin/status.sh)" = 1 ] && grep -q "K_CP=\$(cp_count)" $PKG/bin/status.sh'
-# 1.7.0: 무선 안드로이드 오토 신호(기본 켜짐). 끄기 표시($BK/aa-off)가 없고 우리 hostapd가 돌 때만 sys.kp.aa_ap=1, 바뀔 때만 setprop
+# 1.7.0: 무선 안드로이드 오토 신호(기본 켜짐). 우리 hostapd가 돌 때만 sys.kp.aa_ap=1, 바뀔 때만 setprop. 1.7.4(L-9): 끄기 표시(aa-off)는 보지 않는다
 printf '#!/bin/sh\ncase "$1" in sys.kp.aa_ap) cat %s/aaprop 2>/dev/null ;; *) exec %s/bin/getprop "$@" ;; esac\n' $WE $T > $WE/bin/getprop
 printf '#!/bin/sh\necho "setprop $*" >> %s/setprops; [ "$1" = sys.kp.aa_ap ] && echo "$2" > %s/aaprop\nexit 0\n' $WE $WE > $WE/bin/setprop
 chmod +x $WE/bin/getprop $WE/bin/setprop
 cp $T/ps $WE/ps.keep 2>/dev/null; rm -f $WE/aaprop $WE/setprops $WE/aa-off
 : > $WE/aa-off; echo "  1 root 0 S hostapd $WE/hk.conf" > $T/ps
 (AAOFF=$WE/aa-off; export AAOFF; we aa_sig) > $WE/a1
-check "1.7.0 AA 신호: 끄기 표시(kp-aa-off)가 있으면 setprop 안 함(처음엔 조용히)" '[ ! -f $WE/setprops ] && [ ! -s $WE/a1 ]'
+check "1.7.4 L-9: 끄기 표시(aa-off)가 남아 있어도 aa_sig는 보지 않음(우리 hostapd면 1, 켜짐 로그)" '[ "$(cat $WE/aaprop)" = 1 ] && grep -q "무선 안드로이드 오토(시험) 켜짐" $WE/a1'
+rm -f $WE/aaprop $WE/setprops
 rm -f $WE/aa-off; (AAOFF=$WE/aa-off; export AAOFF; we aa_sig) > $WE/a2; (AAOFF=$WE/aa-off; export AAOFF; we aa_sig) > $WE/a3
 check "  기본(끄기 표시 없음) + 우리 hostapd → 1, 로그 한 줄, 같은 값이면 다시 안 함" '[ "$(cat $WE/aaprop)" = 1 ] && [ "$(grep -c "sys.kp.aa_ap 1" $WE/setprops)" = 1 ] && grep -q "무선 안드로이드 오토(시험) 켜짐" $WE/a2 && [ ! -s $WE/a3 ]'
 : > $T/ps; we aa_sig > $WE/a4
@@ -409,7 +467,7 @@ echo "  1 root 0 S hostapd $WE/hk.conf" > $T/ps
 check "  1.7.2(P-6): 함께 넣은 busybox를 쓰는 내비(tcc803x)도 순정 AP 기록이 없으면 신호를 켬(BB_OWN 조건 뺌)" '[ "$(cat $WE/aaprop)" = 1 ]'
 check "  로그·신호에 SSID·비밀번호 값이 없음" '! grep -q -e SSIDx -e PASS12345 $WE/a2 $WE/a4 $WE/setprops'
 check "  순정 AP 경로(stock_ap_mode)는 신호를 켜지 않음(aa_sig를 부르지 않음)" '[ -z "$(awk "/^stock_ap_mode\(\) \{/,/^}/" $PKG/svc/hotspot.sh | grep "aa_sig")" ]'
-check "  설치 때 어느 USB든 kp-aa-off면 끄기 표시($BK, 업데이트해도 남음), 아니면 kp-aa-on으로 지움(끄기를 먼저 봄)" 'grep -q "kp-aa-off \] || \[ -f /storage/usb1/kp-aa-off \]; then : > \$BK/aa-off" $PKG/scripts/post.sh && grep -q "kp-aa-on \]; then rm -f \$BK/aa-off" $PKG/scripts/post.sh'
+check "  1.7.4 L-9: 설치(post.sh)는 USB의 kp-aa-off·kp-aa-on을 읽지 않고 끄기 표시를 만들거나 지우지 않음" '! grep -v "^ *#" $PKG/scripts/post.sh | grep -q -e "kp-aa-o" -e "aa-off"'
 check "  모드 2.2.0 hooks.jar에 AA 훅이 있음(속성 이름이 패키지와 같음, AP 설정 저장도 막음)" 'unzip -p $PKG/hmgapi/wireless-carplay-aa.zip hooks.jar > $WE/hj.jar && unzip -p $WE/hj.jar classes.dex | strings | grep -qx "sys.kp.aa_ap" && unzip -p $WE/hj.jar classes.dex | strings | grep -qx "setWifiApConfiguration" && grep -q "^AAPROP=sys.kp.aa_ap$" $PKG/svc/hotspot.sh'
 cp $WE/ps.keep $T/ps 2>/dev/null || : > $T/ps
 # 1.7.0: Wi-Fi 장치(wlan0)가 없어 hostapd가 바로 꺼지는 차(그랜저 IG #52·#53). 이번 부팅에 한 번만 남기고 순정 Wi-Fi 기록을 파일로
@@ -451,14 +509,26 @@ check "  hostapd가 없으면 0, 이유 nohostapd" '[ "$(cat $WE/aaprop)" = 0 ] 
 echo "  1 root 0 S hostapd $WE/hk.conf" > $T/ps; : > $WE/bk/stockap.seen; wa aa_sig > $WE/p6f
 check "  순정 카플레이 AP를 본 차(stockap.seen)는 hostapd가 돌아도 0, 이유 stockap(순정 AP 경로 차는 신호를 켜지 않음)" '[ "$(cat $WE/aaprop)" = 0 ] && [ "$(cat $WE/w/aa.why)" = stockap ]'
 rm -f $WE/bk/stockap.seen; : > $WE/bk/aa-off; wa aa_sig > $WE/p6g
-check "  끄기 파일이 있으면 0, 이유 off" '[ "$(cat $WE/aaprop)" = 0 ] && [ "$(cat $WE/w/aa.why)" = off ]'
+check "  1.7.4 L-9: 끄기 파일이 남아 있어도 1, 이유 on(이유 off·'끄기 파일' 문구 없음)" '[ "$(cat $WE/aaprop)" = 1 ] && [ "$(cat $WE/w/aa.why)" = on ] && ! grep -q "끄기 파일" $PKG/svc/hotspot.sh'
 rm -f $WE/bk/aa-off
 (PATH=$WE/bin:$T/bin:/usr/bin:/bin:/sbin HOTSPOT_LIB=1 BB=$T/bin/bb BB_OWN=$T/bin/bb BK=$WE/bk W=$WE/w BOOT_ID=$WE/bootid CONF=$WE/hk.conf sh -c '. '$T'/app/svc/hotspot.sh; export PATH='$WE'/bin:'$T'/bin:/usr/bin:/bin:/sbin; aa_sig') > $WE/p6h 2>&1
 check "  함께 넣은 busybox(BB_OWN)여도 순정 AP 기록이 없으면 1(P-6: BB_OWN 조건 뺌)" '[ "$(cat $WE/aaprop)" = 1 ]'
 wa 'aa_sig 0 yield' > $WE/p6i
 check "  비켜 줄 때는 이유 yield, stop_ap는 이유 stop" '[ "$(cat $WE/w/aa.why)" = yield ] && grep -q "이유 다른 hostapd에 비켜 줌" $WE/p6i && wa "aa_sig; stop_ap" >/dev/null 2>&1 && [ "$(cat $WE/w/aa.why)" = stop ]'
 check "  이유 파일·로그에 SSID·비밀번호 값이 없음" '! grep -q -e SSIDx -e PASS12345 $WE/w/aa.why $WE/p6a $WE/p6b $WE/p6e $WE/p6i'
-check "  status.sh는 kp-aa-off 때 이유 off로 끄고, 리포트에 이유를 보임" 'grep -q "aa_sig 0 off" $PKG/bin/status.sh && grep -q "모드에 알린 신호 .*(이유: " $PKG/bin/status.sh'
+check "  1.7.4 L-9: status.sh는 kp-aa-off·kp-aa-on·끄기 표시(AAOFF)를 읽지 않고, 리포트에 신호 이유를 보임" '! grep -v "^ *#" $PKG/bin/status.sh | grep -q -e "kp-aa-o" -e "AAOFF" && grep -q "모드에 알린 신호 .*(이유: " $PKG/bin/status.sh'
+# 1.7.4(L-9): 1.7.3 이하에서 꺼 둔 차. 서비스가 시작할 때(main) 남은 끄기 표시를 지우고 로그 한 줄, 그 뒤 점검에서 AA 신호가 켜짐
+# (main은 부팅 완료를 기다리는 sleep에서 멈추게 하고, 그 앞까지만 돈다)
+echo 0 > $WE/aaprop; : > $WE/bk/aa-off; wa 'getprop() { :; }; sleep() { exit 0; }; main' > $WE/l9m 2>&1
+# (끄기 표시가 남아도 신호가 켜지는 것은 위 "끄기 파일이 남아 있어도 1, 이유 on" 시험이 본다)
+check "1.7.4 L-9: 서비스 시작 때 남은 끄기 표시(aa-off)를 지우고 로그 한 줄" '[ ! -f $WE/bk/aa-off ] && [ "$(grep -c "예전 무선 안드로이드 오토 끄기 표시를 지웠습니다" $WE/l9m)" = 1 ]'
+wa 'getprop() { :; }; sleep() { exit 0; }; main' > $WE/l9m2 2>&1
+check "  L-9: 표시가 없으면 다시 시작해도 그 로그를 남기지 않음" '! grep -q "끄기 표시를 지웠습니다" $WE/l9m2'
+# 묶음 E 리뷰(낮음 3): 표시를 못 지우면(백업 폴더를 못 씀) 지웠다는 로그를 남기지 않고 지나감(main은 계속 감)
+: > $WE/bk/aa-off; chmod 555 $WE/bk; wa 'getprop() { :; }; sleep() { echo L9-WAIT-REACHED; exit 0; }; main' > $WE/l9m3 2>&1; chmod 755 $WE/bk
+check "  L-9 리뷰: 끄기 표시를 못 지우면 '지웠습니다' 로그 없음(표시는 남음), 서비스는 부팅 완료 기다리기까지 감" '[ -f $WE/bk/aa-off ] && ! grep -q "끄기 표시를 지웠습니다" $WE/l9m3 && grep -qx L9-WAIT-REACHED $WE/l9m3'
+check "1.7.4 D-14(묶음 E 리뷰): 설정이 끝난 차의 30초 점검 '준비됨' 진행 기록이 순정 Wi-Fi 쪽과 같은 '무선 카플레이·안드로이드 오토 준비됨.', 폰 안내 붙은 준비됨 문구 없음" '[ "$(grep -c "prog 100 done \"무선 카플레이·안드로이드 오토 준비됨.\"" $PKG/svc/hotspot.sh)" = 2 ] && ! grep -q "준비됨. 아이폰을 연결해 보세요" $PKG/svc/hotspot.sh $PKG/bin/status.sh'
+rm -f $WE/bk/aa-off
 
 # --- 1.7.2 P-4: AA 상태 안내(hint 파일), aa_events 새 줄 ---
 echo boot-H > $WE/bootid; rm -f $WE/w/aatime $WE/hint
@@ -500,7 +570,7 @@ printf '%s\n' "11-08 02:07:57.610 I/PhoneProjection( 1660): [ WirelessPhoneProje
 echo 0 > $WE/aaprop; wa 'HINT_ON=1; aa_events' > $WE/h7
 check "  신호가 0인 차는 안내하지 않음(줄만 남김)" '! grep -q "^aa=bt" $WE/hint 2>/dev/null && grep -q "다시 연결 거절" $WE/h7'
 rm -f $WE/w/aatime $WE/hint; echo 1 > $WE/aaprop; : > $WE/bk/aa-off; wa 'HINT_ON=1; aa_events' > $WE/h8; rm -f $WE/bk/aa-off
-check "  AA 끄기 파일이 있는 차는 안내하지 않음" '! grep -q "^aa=bt" $WE/hint 2>/dev/null'
+check "  1.7.4 L-9: 끄기 파일이 남아 있어도 신호가 1이면 안내함(aa=bt)" 'grep -qx "aa=bt" $WE/hint'
 rm -f $WE/w/aatime $WE/hint
 printf '%s\n' "11-08 02:07:57.610 I/PhoneProjection( 1660): [ WirelessPhoneProjectionService ] isCheckReady ret = false" "11-08 02:07:57.870 D/PhoneProjection( 1660): [ b ] onSppConnect() ret = false" "11-08 02:09:00.000 I/AAProjection(  775): WirelessExplorer : 	Connection status STATUS_SUCCESS" "11-08 02:09:01.000 D/AAProjection(  775): WifiTransport : onConnectedCallback call  onConnected" > $WE/aalog2
 wa 'HINT_ON=1; aa_events' > $WE/h9
@@ -521,10 +591,10 @@ wa 'HINT_ON=1; aa_sig 0 stop' > /dev/null 2>&1
 check "  신호를 끄면 '준비됨'·AA 안내를 지움" 'grep -qx "aa_ready=" $WE/hint && grep -qx "aa=" $WE/hint'
 wa 'echo 0 > '$WE'/aaprop; HINT_ON=1; aa_sig' > /dev/null 2>&1
 check "  신호가 켜지면 '준비됨' 시각(aa_ready)을 안내 파일에" 'grep -q "^aa_ready=[0-9][0-9]*$" $WE/hint'
-rm -f $WE/hint; wa 'aa_sig 0 off' >/dev/null 2>&1
+rm -f $WE/hint; wa 'aa_sig 0 stop' >/dev/null 2>&1
 check "  Launch(HINT_ON 없음)는 안내 파일을 쓰지 않음" '[ ! -f $WE/hint ]'
-echo 0 > $WE/aaprop; : > $WE/aaoff_m2; wa 'AAOFF='$WE'/aaoff_m2; HINT_ON=1; HA_READY=123; aa_sig' > /dev/null 2>&1; rm -f $WE/aaoff_m2
-check "  리뷰 M-2: Launch가 신호를 먼저 0으로 내렸어도 서비스 점검이 남은 '준비됨'을 지움" 'grep -qx "aa_ready=" $WE/hint'
+echo 0 > $WE/aaprop; : > $WE/bk/stockap.seen; wa 'HINT_ON=1; HA_READY=123; aa_sig' > /dev/null 2>&1; rm -f $WE/bk/stockap.seen
+check "  리뷰 M-2: 신호가 이미 0이면(다른 곳에서 먼저 내림) 서비스 점검이 남은 '준비됨'을 지움" 'grep -qx "aa_ready=" $WE/hint'
 check "  preun이 안내 파일을 지움" 'grep -q "rm -f \$HINT \$HINT.tmp" $PKG/scripts/preun.sh'
 
 # --- 1.7.2 M-8 대신: GPM "준비(1)"가 PP에 닿는지 보는 진단 4줄(bt-aa-autoconnect.md 1-4) ---
@@ -558,10 +628,19 @@ rm -f $WE/w/aatime $WE/hint
 rm -f $WE/w/aatime $WE/hint $WE/w/cpn
 # 재리뷰 L4: 서비스 안의 기다림은 부팅 뒤 초로 잰다(가짜 부팅 뒤 1000초)
 echo "1000.00 1.00" > $WE/uptime
-H0=$(date '+%m-%d %H:%M:%S').000
+# ㉑(흔들림 고침): 로그 시각 H0와 같은 순간의 시계 초(S0)를 한 번에 잡는다. aa_events는 IPH_AT = 부팅 뒤 초 - (지금 - 로그 시각)이므로
+# 1000 - IPH_AT은 "H0 뒤 지난 초"다. 예전에는 0~2초로 못 박아 그 사이 실행이 2초를 넘으면 실패했다(11-13 3번 중 1번).
+# 이제는 시험 직후 잰 실제 경과 초(+1, 초 단위 버림 여유) 이하인지 본다: 실행 속도와 무관하고, 지금 시각으로 잡는 잘못(값이 0)도
+# 로그 시각을 무시하는 잘못(값이 크거나 숫자 아님)도 잡는다
+read H0d H0t S0 <<EOF
+$(date '+%m-%d %H:%M:%S %s')
+EOF
+H0="$H0d $H0t.000"
+# $1 파일의 IPH=<초>가 0 이상이고 S0 뒤 지금까지 지난 초 + 1 이하인가
+iph_since_h0() { _iv=$(sed -n 's/^IPH=//p' $1); case "$_iv" in ''|*[!0-9]*) return 1 ;; esac; [ "$_iv" -le $(( $(date +%s) - S0 + 1 )) ]; }
 echo "$H0 I/HMG-API (  905): [wireless-carplay-aa] bridge: iAP2 connected comp=4" > $WE/aalog2
 wa 'UPTIME='$WE'/uptime; HINT_ON=1; aa_events; echo "IPH=$((1000 - IPH_AT))"' > $WE/i1
-check "1.7.2 P-5: iAP2 연결(구성요소 4) 줄 → 기록 한 줄과 판정 시작(로그 시각 기준)" 'grep -q "카플레이: 아이폰 블루투스 연결(iAP2)" $WE/i1 && grep -q -E "^IPH=[0-2]$" $WE/i1'
+check "1.7.2 P-5: iAP2 연결(구성요소 4) 줄 → 기록 한 줄과 판정 시작(로그 시각 기준)" 'grep -q "카플레이: 아이폰 블루투스 연결(iAP2)" $WE/i1 && iph_since_h0 $WE/i1'
 echo 0 > $WE/w/cpn
 wa 'UPTIME='$WE'/uptime; HINT_ON=1; IPH_AT=$((1000 - 61)); hint_tick' > $WE/i2
 check "  60초 동안 기기 연결이 없으면 iph=wifi 안내와 ap.log 한 줄" 'grep -qx "iph=wifi" $WE/hint && grep -q "60초 동안 Wi-Fi에 오지 않음" $WE/i2'
@@ -596,6 +675,27 @@ rm -rf $WE/bk; mkdir -p $WE/bk; rm -f $WE/w/ktime
 printf '%s\n' "<4>[  950.0] ETHER_TYPE_802_1X[wlan0] [RX] : M4 of 4way" "<6>[  960.0] CFG80211-ERROR) wl_cfg80211_del_station : Disconnect STA : aa:bb:cc:dd:ee:ff" > $WE/dmesg
 wa 'UPTIME='$WE'/uptime; HINT_ON=1; WSTA=0; HA=ok; HA_T=1; wifi_events >/dev/null; hint_tick; echo "HA=[$HA]"' > $WE/aa12
 check "  재리뷰 M3: 연결된 기기가 끊겨 0대가 되면 AA 연결됨을 지움(로그에 까닭)" 'grep -qx "HA=\[\]" $WE/aa12 && grep -q "우리 Wi-Fi에 붙은 기기가 0대가 됨(무선 AA 끊김으로 봄)" $WE/aa12'
+# 1.7.4 B-2 재현(#64 베타 2, 11-11 13:33·13:34 니로): 서비스 시작 회차에 dmesg(AP 올라옴뿐, 폰의 Wi-Fi 인증 줄은 아직 없음)를
+# 먼저 읽고, 뒤에 읽은 logcat에 AA 연결됨(STATUS_SUCCESS)이 있다. 1.7.3은 같은 회차의 hint_tick이 "0대가 됨"으로 바로 지웠다
+rm -rf $WE/bk; mkdir -p $WE/bk; rm -f $WE/w/ktime $WE/w/aatime $WE/hint; echo 1 > $WE/aaprop
+printf '%s\n' "<6>[   28.0] CFG80211-ERROR) wl_notify_connect_status_ap : ** AP/GO Link up event **" > $WE/dmesg
+printf '%s\n' "$(date '+%m-%d %H:%M:%S').100 I/AAProjection(  775): WirelessExplorer : 	Connection status STATUS_SUCCESS" > $WE/aalog2
+wa 'UPTIME='$WE'/uptime; HINT_ON=1; wifi_events >/dev/null; aa_events; hint_tick; echo "HA=[$HA] WSTA=[$WSTA]"; printf "<6>[   28.0] CFG80211-ERROR) wl_notify_connect_status_ap : ** AP/GO Link up event **\n<4>[   35.0] ETHER_TYPE_802_1X[wlan0] [RX] : M4 of 4way\n" > '$WE'/dmesg; wifi_events >/dev/null; aa_events; hint_tick; echo "HA2=[$HA] WSTA2=[$WSTA]"' > $WE/b2a
+check "1.7.4 B-2: AP 올라옴과 같은 회차에 뒤에 읽은 AA 연결됨은 지우지 않음(1.7.3은 '0대가 됨'으로 바로 지움, #64)" 'grep -qx "HA=\[ok\] WSTA=\[0\]" $WE/b2a && ! grep -q "0대가 됨" $WE/b2a && grep -qx "aa=ok" $WE/hint'
+check "  B-2: 다음 회차에 폰의 Wi-Fi 인증 줄이 오면 기기 1대, 연결됨 그대로" 'grep -qx "HA2=\[ok\] WSTA2=\[1\]" $WE/b2a'
+# (앞 시험이 $BK/ktime에 남긴 "커널 35초까지 봄"을 지운다: 남기면 이 AP 올라옴 줄을 이미 본 줄로 건너뛴다)
+rm -rf $WE/bk; mkdir -p $WE/bk; rm -f $WE/w/ktime $WE/w/aatime $WE/hint; : > $WE/aalog2
+printf '%s\n' "<6>[   28.0] CFG80211-ERROR) wl_notify_connect_status_ap : ** AP/GO Link up event **" > $WE/dmesg
+wa 'UPTIME='$WE'/uptime; HINT_ON=1; HA=ok; HA_T=1; WSTA=1; wifi_events >/dev/null; aa_events; hint_tick; echo "HA=[$HA]"' > $WE/b2b
+check "  B-2: 이미 연결됨이던 중에 AP가 다시 올라오고 새 연결됨이 없으면 예전처럼 바로 지움" 'grep -qx "HA=\[\]" $WE/b2b && grep -q "0대가 됨" $WE/b2b'
+# 1.7.4 B-2 리뷰 반영: 같은 회차에 끊김(D)으로 0대 → AP 올라옴(L) → 늦은 연결됨(ok). 끊김 기록(1)을 L이 덮지 않아 예전처럼 지움
+rm -rf $WE/bk; mkdir -p $WE/bk; rm -f $WE/w/ktime $WE/w/aatime $WE/hint; echo 1 > $WE/aaprop
+printf '%s\n' "<6>[   20.0] CFG80211-ERROR) wl_cfg80211_del_station : Disconnect STA : aa:bb:cc:dd:ee:ff" "<6>[   28.0] CFG80211-ERROR) wl_notify_connect_status_ap : ** AP/GO Link up event **" > $WE/dmesg
+printf '%s\n' "$(date '+%m-%d %H:%M:%S').100 I/AAProjection(  775): WirelessExplorer : 	Connection status STATUS_SUCCESS" > $WE/aalog2
+wa 'UPTIME='$WE'/uptime; HINT_ON=1; HA=ok; HA_T=1; WSTA=1; wifi_events >/dev/null; echo "WG=[$WGONE]"; aa_events >/dev/null; hint_tick; echo "HA=[$HA]"' > $WE/b2c
+check "  B-2 리뷰: 같은 회차에 끊김 뒤 AP가 다시 올라오면 끊김 기록을 덮지 않고(WGONE=1), 늦은 연결됨이 와도 예전처럼 지움" 'grep -qx "WG=\[1\]" $WE/b2c && grep -qx "HA=\[\]" $WE/b2c && grep -q "0대가 됨" $WE/b2c'
+rm -rf $WE/bk; rm -f $WE/w/ktime $WE/w/aatime $WE/dmesg $WE/hint; : > $WE/aalog2
+rm -rf $WE/bk; rm -f $WE/w/ktime $WE/w/aatime $WE/dmesg $WE/hint
 wa 'UPTIME='$WE'/uptime; HINT_ON=1; HA=ok; HI=wifi; HI_T=$(date +%s); HI_U=990; hint_tick' > $WE/aa13
 check "  재리뷰 M3: 무선 AA가 연결되면 남아 있던 아이폰 안내도 지움" 'grep -qx "iph=" $WE/hint && grep -q "안내(상태 화면) 지움: 무선 안드로이드 오토 연결됨" $WE/aa13'
 rm -rf $WE/bk; rm -f $WE/w/ktime $WE/dmesg $WE/hint
@@ -618,7 +718,7 @@ check "  리뷰 M-3: 유선(USB, 구성요소 1) 카플레이 중에는 블루�
 rm -f $WE/w/aatime
 printf '%s\n' "$H0 I/HMG-API (  905): [wireless-carplay-aa] bridge: iAP2 connected comp=1" "$H0 I/HMG-API (  905): [wireless-carplay-aa] bridge: iAP2 disconnected comp=1" "$H0 I/HMG-API (  905): [wireless-carplay-aa] bridge: iAP2 connected comp=4" > $WE/aalog2
 wa 'UPTIME='$WE'/uptime; HINT_ON=1; aa_events; echo "IPH=$((1000 - IPH_AT))"' > $WE/i12
-check "  유선이 끊긴 뒤의 블루투스 iAP2는 다시 판정함" 'grep -q -E "^IPH=[0-2]$" $WE/i12'
+check "  유선이 끊긴 뒤의 블루투스 iAP2는 다시 판정함(㉑: H0 뒤 실제 경과 초 이하)" 'iph_since_h0 $WE/i12'
 printf '%s\n' "<6>[  400.0] CFG80211-ERROR) wl_notify_connect_status_ap : ** AP/GO Link up event **" "<4>[  701.372626] ETHER_TYPE_802_1X[wlan0] [RX] : M4 of 4way" > $WE/dmesg; echo "710.50 100.0" > $WE/uptime; rm -f $WE/w/ktime
 wa 'UPTIME='$WE'/uptime; wifi_events; echo "WC=$WCONN_AT"' > $WE/i10
 check "  wifi_events가 기기 연결 시각을 부팅 뒤 초(커널 시각 701초)로 기억(재리뷰 L4: 시계가 아니라 부팅 뒤 초로 비교)" 'grep -qx "WC=701" $WE/i10'
@@ -626,12 +726,17 @@ check "  wifi_events가 기기 연결 시각을 부팅 뒤 초(커널 시각 701
 # 차와 같은 기본값(환경 변수 없음)으로 hotspot.sh를 읽었을 때 경로가 실제 기본값인지(예전에는 KTB가 /ktime)
 DEFP=$(env -i PATH=/usr/bin:/bin HOTSPOT_LIB=1 sh -c '. '$PKG'/svc/hotspot.sh; echo "$KTB|$KT|$BK|$W|$AAOFF|$APON_ORIG"' 2>/dev/null)
 check "베타 2 차주 제보: 환경 변수 없이(차와 같은 기본값) KTB·KT·BK·W·AAOFF·APON_ORIG가 실제 기본 경로(KTB=/data/nemesis/backup/korea.projection/ktime)" '[ "$DEFP" = "/data/nemesis/backup/korea.projection/ktime|/data/local/tmp/korea.projection/ktime|/data/nemesis/backup/korea.projection|/data/local/tmp/korea.projection|/data/nemesis/backup/korea.projection/aa-off|/data/nemesis/backup/korea.projection/wifi_ap_on.orig" ]'
+check "1.7.4 B-7: 백업 폴더 경로는 hotspot.sh에 한 번만(BK 기본값, AAOFF보다 위), AAOFF·APON_ORIG·KTB는 \$BK를 씀" '[ "$(grep -c "/data/nemesis/backup/korea.projection" $PKG/svc/hotspot.sh)" = 1 ] && [ "$(grep -n "^BK=" $PKG/svc/hotspot.sh | cut -d: -f1)" -lt "$(grep -n "^AAOFF=" $PKG/svc/hotspot.sh | cut -d: -f1)" ] && grep -qx "AAOFF=\${AAOFF:-\$BK/aa-off}" $PKG/svc/hotspot.sh && grep -qx "KTB=\${KTB:-\$BK/ktime}" $PKG/svc/hotspot.sh && grep -qx "APON_ORIG=\${APON_ORIG:-\$BK/wifi_ap_on.orig}" $PKG/svc/hotspot.sh'
+DEFP2=$(env -i PATH=/usr/bin:/bin BK=/x/bk HOTSPOT_LIB=1 sh -c '. '$PKG'/svc/hotspot.sh; echo "$KTB|$AAOFF|$APON_ORIG|$PERMS_OURS"' 2>/dev/null)
+check "  B-7: BK를 바꾸면 KTB·AAOFF·APON_ORIG·PERMS_OURS가 모두 그 아래" '[ "$DEFP2" = "/x/bk/ktime|/x/bk/aa-off|/x/bk/wifi_ap_on.orig|/x/bk/perms.ours" ]'
 # 정적 검사: 맨 위 기본값 대입이 아래에서 정해지는 변수를 먼저 쓰지 않음, "> 파일 2>/dev/null" 순서가 없음(tests/tools/defuse-check.py)
 python3 $B/tests/tools/defuse-check.py $PKG > $T/defuse.out 2>&1; DEFRC=$?
 check "  베타 2 차주 제보: 정적 검사 — 정의 전에 쓰는 변수·'> 파일 2>/dev/null' 순서가 패키지 스크립트에 없음" '[ $DEFRC = 0 ] && [ ! -s $T/defuse.out ]' || cat $T/defuse.out
 # 검사기가 헛돌지 않는지: 예전 꼴(KTB=${KTB:-$BK/ktime}, "> $KTB 2>/dev/null")을 심은 사본에서는 잡아야 함
 mkdir -p $T/defbad/svc $T/defbad/bin $T/defbad/scripts; cp $PKG/bin/status.sh $PKG/bin/carreport.sh $T/defbad/bin/; cp $PKG/scripts/post.sh $PKG/scripts/preun.sh $T/defbad/scripts/
-sed -e 's#^KTB=.*#KTB=${KTB:-$BK/ktime}#' -e 's#echo "$_bid $_kt $WSTA" 2>/dev/null > $KTB#echo "$_bid $_kt $WSTA" > $KTB 2>/dev/null#' $PKG/svc/hotspot.sh > $T/defbad/svc/hotspot.sh
+# 1.7.4(B-7): BK 기본값이 맨 위로 옮겨졌으므로, 예전처럼 BK를 아래(옛 자리 주석 줄)에서 정하는 꼴로 되돌려 심는다
+sed -e 's#^KTB=.*#KTB=${KTB:-$BK/ktime}#' -e 's#echo "$_bid $_kt $WSTA" 2>/dev/null > $KTB#echo "$_bid $_kt $WSTA" > $KTB 2>/dev/null#' \
+  -e '/^BK=\${BK:-\/data\/nemesis\/backup\/korea.projection}$/d' -e 's#^\# BK(백업 폴더)는 맨 위 AAOFF 앞에서 정한다(1.7.4 B-7)$#BK=${BK:-/data/nemesis/backup/korea.projection}#' $PKG/svc/hotspot.sh > $T/defbad/svc/hotspot.sh
 python3 $B/tests/tools/defuse-check.py $T/defbad > $T/defbad.out 2>&1; DEFRC2=$?
 check "  베타 2 차주 제보: 정적 검사가 예전 꼴을 잡음(KTB가 BK를 먼저 씀, '> \$KTB 2>/dev/null' 순서)" '[ $DEFRC2 = 1 ] && grep -q "KTB=…가 BK" $T/defbad.out && grep -q "^svc/hotspot.sh:[0-9]* \"> 파일 2>/dev/null\" 순서" $T/defbad.out'
 rm -rf $T/defbad
@@ -757,10 +862,11 @@ case "\$1 \$2" in
   "engine verify-map") [ -f $X/vm_fail ] && { echo "the map doesn't fit"; exit 1; }; echo "map checked"; exit 0 ;;
   "engine map-car") [ -f $X/mc_fail ] && { echo "error"; exit 1; }
     [ -f $X/mc_nw ] && { echo "not written: HMG-API has a map for this car (kia/dl3/kor/260101)"; exit 0; }
+    [ -f $X/mc_empty ] && { echo "map-car: 0 hook point(s) found"; exit 0; }
     p=\$(cat $T/product 2>/dev/null || echo DEPEHEV.KOR.0000.V039.001.260902); m=\$(echo \$p | awk -F. '{print tolower(\$1)}'); f=\$(echo \$p | awk -F. '{print \$NF}')
     mkdir -p $X/hd/maps/unknown/\$m/kor/\$f; echo '{"status": "probed"}' > $X/hd/maps/unknown/\$m/kor/\$f/car.json
     echo "map-car: 342 hook point(s) found"; echo "written: unknown/\$m/kor/\$f (status probed): run hmgapid engine verify-map, then restart, for its hooks"; exit 0 ;;
-  "engine install") [ -f "\$BK/mod.pin" ] && echo "pin-at-install" >> $X/calls; [ -f $X/inst_fail ] && exit 1; [ -f $X/chip_drop ] && { rm -rf $X/sdio; mkdir -p $X/sdio; exit 1; }; case "\$3" in *-2.4.0.zip) [ -f $X/inst_noop ] || { [ -f "\$HMGDATA/mods/wireless-carplay-aa/mod.json" ] && sed "s/2[.]4[.]1/2.4.0/" "\$HMGDATA/mods/wireless-carplay-aa/mod.json" > "\$HMGDATA/mods/wireless-carplay-aa/mod.json.t" && mv -f "\$HMGDATA/mods/wireless-carplay-aa/mod.json.t" "\$HMGDATA/mods/wireless-carplay-aa/mod.json"; } ;; esac; mkdir -p $X/hd/mods/wireless-carplay-aa; echo '{}' > $X/hd/mods/wireless-carplay-aa/mod.json; exit 0 ;;
+  "engine install") [ -f "\$BK/mod.pin" ] && echo "pin-at-install" >> $X/calls; [ -f $X/inst_fail ] && exit 1; [ -f $X/chip_drop ] && { rm -rf $X/sdio; mkdir -p $X/sdio; exit 1; }; case "\$3" in *-2.4.1.zip) [ -f $X/inst_noop ] || { [ -f "\$HMGDATA/mods/wireless-carplay-aa/mod.json" ] && sed "s/2[.]4[.][2345]/2.4.1/" "\$HMGDATA/mods/wireless-carplay-aa/mod.json" > "\$HMGDATA/mods/wireless-carplay-aa/mod.json.t" && mv -f "\$HMGDATA/mods/wireless-carplay-aa/mod.json.t" "\$HMGDATA/mods/wireless-carplay-aa/mod.json"; } ;; esac; mkdir -p $X/hd/mods/wireless-carplay-aa; echo '{}' > $X/hd/mods/wireless-carplay-aa/mod.json; exit 0 ;;
   "engine plan") [ -f $X/plan_fail ] && { echo "error: engine is busy"; exit 3; }; cat $X/plan; exit 0 ;;
   "engine apply") [ -f $X/apply_fail ] && exit 1; exit 0 ;;
   "engine remove") rm -rf $X/hd/mods/\$3; exit 0 ;;
@@ -772,17 +878,17 @@ chmod +x $X/bin/hmgapid
 PLAN_OK='change   /system/onebin/depehev_kr/featurexml.cfg [wireless-carplay-aa] -> 2a7c   [restart the head unit]
 setting  prop/persist.sys.iap2.wifi = t [wireless-carplay-aa]
 hook plan: wireless-carplay-aa on'
-asreset() { rm -rf $X/hd $X/bk $X/w $X/calls $X/mc_nw $X/vm_fail $X/inst_fail $X/apply_fail $X/down $T/notice; mkdir -p $X/hd/maps/kia/ev6 $X/bk $X/w; mkdir -p $X/hd/public; : > $X/hd/public/wifi-chip; printf '%s\n' "$PLAN_OK" > $X/plan; }
+asreset() { rm -rf $X/hd $X/bk $X/w $X/calls $X/mc_nw $X/vm_fail $X/inst_fail $X/apply_fail $X/down $T/notice; : > $X/calls; mkdir -p $X/hd/maps/kia/ev6 $X/bk $X/w; mkdir -p $X/hd/public; : > $X/hd/public/wifi-chip; printf '%s\n' "$PLAN_OK" > $X/plan; }
 as() { (PATH=$X/bin:$T/bin:/usr/bin:/bin:/sbin HOTSPOT_LIB=1 BB=$T/bin/bb W=$X/w BK=$X/bk HMGDATA=$X/hd KP_HMG=$T/app/hmgapi SDIO=$X/nosdio sh -c '. '$T'/app/svc/hotspot.sh; export PATH='$X'/bin:'$T'/bin:/usr/bin:/bin:/sbin; setup_hmgapi'); }
 NM=$X/hd/maps/kia/niro/kor/260902
 asreset; as > $X/out
 check "자동 설정: 니로 지도 12개를 넣고 HMG-API 지도 확인 실행" '[ "$(ls $NM | wc -l | tr -d " ")" = 12 ] && grep -qx "hmgapid engine verify-map" $X/calls && [ -f $X/bk/map.ours ]'
 check "  넣은 지도가 패키지 것과 같음" 'diff -r $NM $T/app/hmgapi/maps/kia/niro/kor/260902 >/dev/null'
 check "  무선 모드 설치 → 계획이 이 모드뿐 → 적용, 우리가 설치한 표시" 'grep -q "hmgapid engine install .*/hmgapi/wireless-carplay-aa.zip" $X/calls && grep -qx "hmgapid engine apply" $X/calls && [ -f $X/bk/mod.ours ] && [ -f $X/bk/mod.tried ]'
-check "  끝나면 내비를 재부팅하라는 알림(RESET 버튼 또는 NEMESIS)" 'grep -q "설정을 마쳤습니다. 내비를 재부팅해 주세요(RESET 버튼 또는 NEMESIS 재부팅)" $T/notice'
-rm -f $X/calls $T/notice; as > $X/out
+check "  끝나면 내비를 재부팅하라는 알림(1.7.4 묶음 E: 상태 화면과 같은 '3분 후 재부팅', RESET 괄호 뺌)" 'grep -q "설정을 마쳤습니다. 내비를 3분 후 재부팅해 주세요." $T/notice && ! grep -q "RESET 버튼 또는 NEMESIS" $T/notice'
+rm -f $X/calls $T/notice; : > $X/calls; as > $X/out
 check "  다시 부팅해도 이미 있으면 아무것도 안 함" '! grep -q -E "install|apply|verify-map" $X/calls && [ ! -f $T/notice ]'
-rm -rf $X/hd/mods/wireless-carplay-aa; rm -f $X/calls; as > $X/out
+rm -rf $X/hd/mods/wireless-carplay-aa; rm -f $X/calls; : > $X/calls; as > $X/out
 check "차주가 모드를 지운 뒤에는 다시 설치하지 않음 (mod.tried)" '! grep -q "engine install" $X/calls'
 asreset; mkdir -p $NM; echo official > $NM/car.json; as > $X/out
 check "HMG-API에 이 차 지도가 이미 있으면(공식판 등) 덮어쓰지 않음 (다른 차 지도만 넣음)" '[ "$(cat $NM/car.json)" = official ] && ! grep -q verify-map $X/calls && ! grep -q "kia/niro" $X/bk/map.ours 2>/dev/null'
@@ -835,7 +941,7 @@ asreset; rm -f $X/prog; echo TESTX.USA.0000.V001.001.250101 > $T/product; asp > 
 check "  지원하지 않는 차(해외)는 바로 실패로 끝남(진행 중으로 남지 않음)" 'grep -qx "state=fail" $X/prog && grep -q "^stage=지원하지 않는 차" $X/prog'
 asreset; touch $X/inst_fail; as > $X/out
 check "모드 설치 실패 → 안내, 우리 것 표시 없음, 적용 안 함" 'grep -q "설치하지 못했습니다" $T/notice && [ ! -f $X/bk/mod.ours ] && ! grep -q "engine apply" $X/calls'
-rm -f $X/inst_fail $X/calls; as > $X/out
+rm -f $X/inst_fail $X/calls; : > $X/calls; as > $X/out
 check "  일시적인 설치 실패는 다음 부팅에 다시 함 (mod.tried 안 남김)" 'grep -q "engine install" $X/calls && [ -f $X/bk/mod.ours ]'
 # 1.5.7: 이미 있는 우리 모드(2.1.0)를 패키지의 새 판(2.1.1, 계기판 안내 수정)으로 바꾸기
 KMJ210='{"id": "wireless-carplay-aa", "version": "2.1.0", "system": [{"model": ["DEPEHEV"], "region": "KOR", "firmware": "260902"}]}'
@@ -846,9 +952,14 @@ check "  mod_ver: mod.json의 version을 셸만으로 읽음" '[ "$(museed; HOTS
 vl() { (HOTSPOT_LIB=1 BB=$T/bin/bb W=$X/w sh -c ". $T/app/svc/hotspot.sh; ver_lt $1 $2"); }
 check "  ver_lt: 2.1.0<2.1.1, 1.9.9<2.1.1, 2.1<2.1.1, 2.1.1<2.1.10 / 같거나 높거나 숫자 아니면 아님" 'vl 2.1.0 2.1.1 && vl 1.9.9 2.1.1 && vl 2.1 2.1.1 && vl 2.1.1 2.1.10 && ! vl 2.1.1 2.1.1 && ! vl 2.2.0 2.1.1 && ! vl x 2.1.1 && ! vl "" 2.1.1'
 # 1.7.3: 1.7.2 정식(모드 2.4.0)에서 1.7.3(2.4.1)으로 올리는 차: 우리 2.4.0이 있으면 새 판으로 설치하고 재부팅 안내
-museed; echo "$KMJ210" | sed 's/2\.1\.0/2.4.0/' > $X/hd/mods/wireless-carplay-aa/mod.json; asp > $X/out
-check "1.7.3 모드 2.4.1: 차에 우리 2.4.0이 있으면 패키지의 2.4.1로 설치(mod_update), 진행 기록 '새 판(2.4.1)으로 바꿨습니다'·재부팅 필요, 판 기록 mod.upd" 'grep -q "hmgapid engine install .*/hmgapi/wireless-carplay-aa.zip" $X/calls && grep -qx "state=reboot" $X/prog && grep -q "^stage=무선 모드를 새 판(2.4.1)으로 바꿨습니다" $X/prog && [ "$(cat $X/bk/mod.upd)" = "2.4.1 1" ] && grep -q "업데이트함: 2.4.0 →" $X/out'
-check "  패키지 모드 zip md5가 MOD_MD5(2.4.1 확정, 0667dff0…)와 같음" '[ "$(sed -n "s/^MOD_MD5=//p" $PKG/svc/hotspot.sh)" = 0667dff0a8469241689baf13e36e41f9 ] && [ "$(md5 -q $PKG/hmgapi/wireless-carplay-aa.zip 2>/dev/null || md5sum < $PKG/hmgapi/wireless-carplay-aa.zip | cut -c1-32)" = 0667dff0a8469241689baf13e36e41f9 ] && [ "$MV" = 2.4.1 ]'
+# 1.7.4 베타 2(묶음 G, 모드 2.4.3): 1.7.3(2.4.1)에서 올라온 차와 베타 1(2.4.2)에서 올라온 차 둘 다 패키지의 판으로 바꾼다
+# 1.7.4 베타 3(모드 2.4.4): 베타 2(2.4.3)가 깔린 차도 같은 길로 패키지의 판으로 바꾼다
+# 1.7.4 정식(모드 2.4.5): 공개하지 않은 베타 3 준비판(2.4.4)을 시험한 차도 같은 길로 2.4.5로 바꾼다
+for v0 in 2.4.1 2.4.2 2.4.3 2.4.4; do
+museed; echo "$KMJ210" | sed "s/2\.1\.0/$v0/" > $X/hd/mods/wireless-carplay-aa/mod.json; asp > $X/out
+check "1.7.4 정식 모드 2.4.5: 우리 $v0이 있는 차는 패키지의 2.4.5로 설치(mod_update), 진행 기록 '새 판(2.4.5)으로 바꿨습니다. 내비를 3분 후 재부팅'·재부팅 필요, 판 기록 mod.upd" 'grep -q "hmgapid engine install .*/hmgapi/wireless-carplay-aa.zip" $X/calls && grep -qx "state=reboot" $X/prog && grep -Fqx "stage=무선 모드를 새 판(2.4.5)으로 바꿨습니다. 내비를 3분 후 재부팅해 주세요." $X/prog && [ "$(cat $X/bk/mod.upd)" = "2.4.5 1" ] && grep -Fq "업데이트함: $v0 → 2.4.5" $X/out && ! grep -qx "hmgapid engine apply" $X/calls'
+done
+check "  1.7.4 정식: 패키지 모드 zip md5가 MOD_MD5(2.4.5, 3ae04850…, 별표 키 안내 팝업 건너뛰기)와 같고, 옛 2.4.2(c2b295da…)·2.4.3(bae41fd0…)·2.4.4(baa70059…) md5는 패키지에 없음" '[ "$(sed -n "s/^MOD_MD5=//p" $PKG/svc/hotspot.sh)" = 3ae048506f637548561f09fd5e549337 ] && [ "$(md5 -q $PKG/hmgapi/wireless-carplay-aa.zip 2>/dev/null || md5sum < $PKG/hmgapi/wireless-carplay-aa.zip | cut -c1-32)" = 3ae048506f637548561f09fd5e549337 ] && [ "$MV" = 2.4.5 ] && ! grep -rq c2b295da $PKG && ! grep -rq bae41fd0 $PKG && ! grep -rq baa70059 $PKG'
 museed; asp > $X/out
 check "1.5.7: 우리가 넣은 2.1.0이 있으면 새 판으로 설치, 적용은 안 함(hooks.jar만: nothing changed), 재부팅 안내(1.7.3 U-5: 진행 기록에만, 알림에 겹치지 않음)" 'grep -q "hmgapid engine install .*/hmgapi/wireless-carplay-aa.zip" $X/calls && ! grep -qx "hmgapid engine apply" $X/calls && [ "$(cat $X/bk/mod.upd)" = "$MV 1" ] && grep -qx "state=reboot" $X/prog && grep -q "^stage=무선 모드를 새 판($MV)으로 바꿨습니다" $X/prog && ! grep -q "새 판($MV)으로 바꿨습니다. 내비를 재부팅" $T/notice 2>/dev/null && grep -q "업데이트함: 2.1.0 →" $X/out'
 # 1.7.1: 알림 기록(토스트 대신): busybox 차는 최근 5줄만, 644, 임시 파일 안 남음
@@ -906,9 +1017,9 @@ museed; sed "s/2.1.0/9.0.0/" $X/hd/mods/wireless-carplay-aa/mod.json > $X/mj && 
 check "  차에 더 새 판이 있으면 내리지 않음" '! grep -q "engine install" $X/calls'
 museed; touch $X/inst_fail; asp > $X/out
 check "  설치 실패 1번째: 이전 판 그대로, 실패 안내 없이 다음 부팅에 다시(횟수 1)" '! grep -q "바꾸지 못했습니다" $T/notice 2>/dev/null && grep -q "2.1.0" $X/hd/mods/wireless-carplay-aa/mod.json && [ "$(cat $X/bk/mod.upd)" = "$MV 1" ] && grep -q "업데이트 실패(1/3)" $X/out'
-rm -f $X/calls $T/notice $X/prog; asp > $X/out; rm -f $X/calls $T/notice $X/prog; asp > $X/out; rm -f $X/inst_fail
+rm -f $X/calls $T/notice $X/prog; : > $X/calls; asp > $X/out; rm -f $X/calls $T/notice $X/prog; : > $X/calls; asp > $X/out; rm -f $X/inst_fail
 check "  3번째도 실패하면 그때 한 번 안내(진행 기록 실패 문구, 알림에 겹치지 않음), 적용 안 함" 'grep -q "^stage=무선 모드를 새 판으로 바꾸지 못했습니다. 카플레이는 이전 판으로 계속 됩니다" $X/prog && ! grep -q "새 판으로 바꾸지 못했습니다" $T/notice 2>/dev/null && grep -qx "state=fail" $X/prog && ! grep -q "engine apply" $X/calls && [ "$(cat $X/bk/mod.upd)" = "$MV 3" ]'
-rm -f $X/calls $T/notice; asp > $X/out
+rm -f $X/calls $T/notice; : > $X/calls; asp > $X/out
 check "  그 뒤로는 이 버전을 다시 시도하지 않음" '! grep -q "engine install" $X/calls && [ ! -f $T/notice ]'
 # 1.5.7 니로에서 실제로 나온 계획(2026-11-07 21:36): "same" 줄뿐, "nothing changed" 줄은 없음
 PLAN_SAME='same     /system/etc/permissions/com.hkmc.software.connectivity.androidauto_wireless.xml [wireless-carplay-aa]
@@ -919,7 +1030,7 @@ same     setting prop/persist.iap2.iden.wireless = t [wireless-carplay-aa]
 same     setting prop/persist.ium.support = carplay [wireless-carplay-aa]
 same     setting prop/persist.sys.iap2.wifi = t [wireless-carplay-aa]'
 museed; printf '%s\n' "$PLAN_SAME" > $X/plan; asp > $X/out
-check "  니로에서 나온 계획('same' 줄뿐)이면 적용할 것이 없어 앱 적용 안내 없이 재부팅만 안내" '! grep -qx "hmgapid engine apply" $X/calls && ! grep -q "앱에서 변경 사항을 적용" $T/notice && grep -qx "state=reboot" $X/prog && ! grep -q "차주에게 맡김" $X/out'
+check "  니로에서 나온 계획('same' 줄뿐)이면 적용할 것이 없어 앱 적용 안내 없이 재부팅만 안내" '! grep -qx "hmgapid engine apply" $X/calls && ! grep -q "앱에서 변경 사항을 적용" $T/notice 2>/dev/null && grep -qx "state=reboot" $X/prog && ! grep -q "차주에게 맡김" $X/out'
 # 1.7.3(M-9): HMG-API 계획의 note 줄(예: "line … isn't there: nothing to comment")은 변경이 아니다(쓸데없는 "앱에서 적용" 안내 없음)
 museed; printf '%s\n' "$PLAN_SAME" "note     /system/onebin/depehev_kr/featurexml.cfg: line \"-x\" isn't there: nothing to comment" > $X/plan; asp > $X/out
 check "1.7.3 M-9: 'same'과 'note' 줄뿐인 계획이면 적용할 것이 없어 앱 적용 안내 없이 재부팅만 안내" '! grep -qx "hmgapid engine apply" $X/calls && ! grep -q "앱에서 변경 사항을 적용" $X/prog && grep -qx "state=reboot" $X/prog'
@@ -932,70 +1043,104 @@ check "  'nothing changed'여도 problem 줄이 있으면 앱에서 확인하라
 museed; rm -rf $X/hd/mods; asp > $X/out
 check "  모드가 없으면(차주가 지움) 업데이트 경로는 아무것도 안 함" '! grep -q "engine install" $X/calls'
 if [ -d $B/usb-modrollback ]; then
-# 되돌리기 USB(usb-modrollback): 1.7.3(K-9)부터 1.7.3의 2.4.1을 1.7.2의 2.4.0으로 --force 설치하고 고정(1.7.2 R-4와 같은 방식).
-# 1.7.2용 USB(2.3.1~2.4.0 → 2.3.0)는 v1.7.2 릴리스에 공개된 것을 그대로 둔다. 토스트 없이 RESULT.txt·알림 기록
-RB=$T/rb; RBS=$B/usb-modrollback/NEMESIS.sh; RBZ=$B/usb-modrollback/kp-rollback/wireless-carplay-aa-2.4.0.zip
-# 차에 있는 1.7.3 모드(2.4.1). 아래 시험은 이 판을 다른 판으로 바꿔(sed) 쓴다
-KMJ231='{"id": "wireless-carplay-aa", "version": "2.4.1", "system": [{"model": ["DEPEHEV"], "region": "KOR", "firmware": "260902"}]}'
-rbreset() { rm -rf $RB; mkdir -p $RB/usb/kp-rollback $RB/hd/mods/wireless-carplay-aa $RB/bk $RB/d $RB/kw $RB/proc $RB/w; : > $RB/bk/mod.ours; echo boot1 > $RB/bootid; cp $RBZ $RB/usb/kp-rollback/; echo "$KMJ231" > $RB/hd/mods/wireless-carplay-aa/mod.json; rm -f $X/calls $T/notice $X/inst_fail $X/apply_fail $X/plan_fail $X/inst_noop; printf '%s\n' "$PLAN_OK" > $X/plan; echo "/dev/block/sda1 $RB/usb vfat rw 0 0" > $RB/mounts; }
+# 되돌리기 USB(usb-modrollback): 1.7.4(묶음 D)부터 1.7.4의 판(베타 1 2.4.2, 묶음 G부터 베타 2 2.4.3도)을 1.7.3의 2.4.1로 --force 설치하고 고정(1.7.3 K-9와 같은 방식, 판·MD5·문구만 바꿈).
+# 1.7.3용 USB(2.4.1 → 2.4.0)·1.7.2용(→ 2.3.0)은 각 릴리스에 공개된 것을 그대로 둔다. 토스트 없이 RESULT.txt·알림 기록
+RB=$T/rb; RBS=$B/usb-modrollback/NEMESIS.sh; RBZ=$B/usb-modrollback/kp-rollback/wireless-carplay-aa-2.4.1.zip
+# 차에 있는 1.7.4 베타 1 모드(2.4.2). 아래 시험은 이 판을 다른 판(2.4.3 등)으로 바꿔(sed) 쓴다
+KMJ231='{"id": "wireless-carplay-aa", "version": "2.4.2", "system": [{"model": ["DEPEHEV"], "region": "KOR", "firmware": "260902"}]}'
+rbreset() { rm -rf $RB; mkdir -p $RB/usb/kp-rollback $RB/hd/mods/wireless-carplay-aa $RB/bk $RB/d $RB/kw $RB/proc $RB/w; : > $RB/bk/mod.ours; echo boot1 > $RB/bootid; cp $RBZ $RB/usb/kp-rollback/; echo "$KMJ231" > $RB/hd/mods/wireless-carplay-aa/mod.json; rm -f $X/calls $T/notice $X/inst_fail $X/apply_fail $X/plan_fail $X/inst_noop; : > $X/calls; printf '%s\n' "$PLAN_OK" > $X/plan; echo "/dev/block/sda1 $RB/usb vfat rw 0 0" > $RB/mounts; }
 # 스크립트 첫 줄의 차 PATH를 테스트 PATH(가짜 hmgapid·am)로 바꿔 돌린다(fixpath와 같은 방식)
 rb() { sed "s#^export PATH=.*#export PATH=$X/bin:$T/bin:/usr/bin:/bin:/sbin#" $RBS > $RB/run.sh; (KP_FROM_DATA=1 BB=$T/bin/bb U=$RB/usb D=$RB/d HMGDATA=$RB/hd BK=$RB/bk MOUNTS=$RB/mounts KW=$RB/kw PROC=$RB/proc BOOT_ID=$RB/bootid NOTICE=$RB/notice sh $RB/run.sh) > $RB/out 2>&1; }
 # 결과: USB의 RESULT.txt와 상태 화면 알림 기록 둘 다에 있는가
 rbres() { grep -q "$1" $RB/usb/kp-rollback/RESULT.txt && grep -q "^[0-9][0-9]* boot1 되돌리기 USB: .*$1" $RB/notice; }
-# 1.7.3 패키지의 mod_update(부팅 2분 뒤)를 이 차 상태로 돌린다
+# 1.7.4 패키지의 mod_update(부팅 2분 뒤)를 이 차 상태로 돌린다
 rbmu() { (PATH=$X/bin:$T/bin:/usr/bin:/bin:/sbin HOTSPOT_LIB=1 BB=$T/bin/bb W=$RB/w BK=$RB/bk HMGDATA=$RB/hd KP_HMG=$T/app/hmgapi NOTICE=$RB/pkgnotice sh -c '. '$T'/app/svc/hotspot.sh; export PATH='$X'/bin:'$T'/bin:/usr/bin:/bin:/sbin; mod_update; echo "rc=$?"') > $RB/mu.out 2>&1; }
 check "되돌리기 USB: 스크립트 앞에 umask 077, 셸 문법, 토스트(am broadcast) 없음" 'grep -qx "umask 077" $RBS && sh -n $RBS && ! grep -q -i -e "am broadcast" -e "TOAST" $RBS'
-check "  USB의 되돌리기 zip이 1.7.2 패키지 모드(2.4.0, 1.7.2 MOD_MD5)의 md5와 같고, 옛 2.1.0·2.3.0 zip은 USB에 없음" '[ "$(md5sum < $RBZ | cut -c1-32)" = "$(sed -n "s/^OLD_MD5=//p" $RBS)" ] && [ "$(sed -n "s/^OLD_MD5=//p" $RBS)" = 82b013c6b547dce0e958109b0d2eea98 ] && unzip -p $RBZ mod.json | grep -q "\"version\": \"2.4.0\"" && [ ! -f $B/usb-modrollback/kp-rollback/wireless-carplay-aa-2.3.0.zip ] && [ ! -f $B/usb-modrollback/kp-rollback/wireless-carplay-aa-2.1.0.zip ]'
-check "  되돌리는 판(FROM_VERS)은 1.7.3의 2.4.1 하나이고 패키지의 MOD_VER가 들어 있음" '[ "$(sed -n "s/^FROM_VERS=//p" $RBS)" = "\" 2.4.1 \"" ] && case "$(sed -n "s/^FROM_VERS=//p" $RBS)" in *" $(sed -n "s/^MOD_VER=//p" $PKG/svc/hotspot.sh) "*) true ;; *) false ;; esac'
+check "  USB의 되돌리기 zip이 1.7.3 패키지 모드(2.4.1, 1.7.3 MOD_MD5)의 md5와 같고, 옛 2.1.0·2.3.0 zip은 USB에 없음" '[ "$(md5sum < $RBZ | cut -c1-32)" = "$(sed -n "s/^OLD_MD5=//p" $RBS)" ] && [ "$(sed -n "s/^OLD_MD5=//p" $RBS)" = 0667dff0a8469241689baf13e36e41f9 ] && unzip -p $RBZ mod.json | grep -q "\"version\": \"2.4.1\"" && [ ! -f $B/usb-modrollback/kp-rollback/wireless-carplay-aa-2.3.0.zip ] && [ ! -f $B/usb-modrollback/kp-rollback/wireless-carplay-aa-2.1.0.zip ]'
+check "  되돌리는 판(FROM_VERS)은 1.7.4의 2.4.2·2.4.3·2.4.4·2.4.5 넷이고 패키지의 MOD_VER가 들어 있음, 되돌릴 판(TO_VER)은 2.4.1" '[ "$(sed -n "s/^FROM_VERS=//p" $RBS)" = "\" 2.4.2 2.4.3 2.4.4 2.4.5 \"" ] && case "$(sed -n "s/^FROM_VERS=//p" $RBS)" in *" $(sed -n "s/^MOD_VER=//p" $PKG/svc/hotspot.sh) "*) true ;; *) false ;; esac && [ "$(sed -n "s/^TO_VER=//p" $RBS)" = 2.4.1 ] && [ ! -f $B/usb-modrollback/kp-rollback/wireless-carplay-aa-2.4.0.zip ]'
 rbreset; rb
-check "  2.4.1 → --force로 2.4.0 설치, 고정(mod.pin), 적용, RESULT.txt·상태 화면에 재부팅 안내, 알림 없음, 기록을 USB에" 'grep -q "hmgapid engine install .*wireless-carplay-aa-2.4.0.zip --force" $X/calls && grep -qx "hmgapid engine apply" $X/calls && [ -f $RB/bk/mod.pin ] && rbres "2.4.0으로 되돌리고 고정했습니다. 내비를 재부팅" && [ ! -f $T/notice ] && [ -f $RB/usb/kp-rollback/log/rollback.log ] && [ "$(stat -f %Lp $RB/notice)" = 644 ]'
-# 차 흐름: 2.4.1 → (USB) 2.4.0 → 고정 → 재부팅(1.7.3 mod_update가 다시 바꾸지 않음) → (USB UNPIN) → 재부팅 → 2.4.1
-echo "$KMJ231" | sed 's/2\.4\.1/2.4.0/' > $RB/hd/mods/wireless-carplay-aa/mod.json; rm -f $X/calls; rbmu
-check "  흐름: 고정된 2.4.0이면 재부팅 뒤 1.7.3 mod_update가 2.4.1로 다시 바꾸지 않음" 'grep -qx "rc=1" $RB/mu.out && ! grep -q "engine install" $X/calls 2>/dev/null'
-: > $RB/usb/kp-rollback/UNPIN; echo "2.4.1 3" > $RB/bk/mod.upd; rm -f $RB/usb/kp-rollback/RESULT.txt; rb; rm -f $RB/usb/kp-rollback/UNPIN
-check "  흐름: UNPIN이면 고정만 풂(mod.pin·mod.upd 지움), 설치 안 함, 결과 안내" '[ ! -f $RB/bk/mod.pin ] && [ ! -f $RB/bk/mod.upd ] && ! grep -q "engine install" $X/calls 2>/dev/null && rbres "고정을 풀었습니다"'
-rm -f $X/calls; rbmu
-check "  흐름: 고정을 푼 뒤 재부팅하면 1.7.3 mod_update가 패키지의 판(2.4.1)을 설치(시도 1)" 'grep -q "hmgapid engine install .*/hmgapi/wireless-carplay-aa.zip" $X/calls && [ "$(cat $RB/bk/mod.upd)" = "$(sed -n "s/^MOD_VER=//p" $PKG/svc/hotspot.sh) 1" ]'
+check "  2.4.2 → --force로 2.4.1 설치, 고정(mod.pin), 적용, RESULT.txt·상태 화면에 재부팅 안내, 알림 없음, 기록을 USB에" 'grep -q "hmgapid engine install .*wireless-carplay-aa-2.4.1.zip --force" $X/calls && grep -qx "hmgapid engine apply" $X/calls && [ -f $RB/bk/mod.pin ] && rbres "2.4.1로 되돌리고 고정했습니다. 내비를 재부팅" && [ ! -f $T/notice ] && [ -f $RB/usb/kp-rollback/log/rollback.log ] && [ "$(stat -f %Lp $RB/notice)" = 644 ]'
+# 차 흐름: 2.4.2 → (USB) 2.4.1 → 고정 → 재부팅(1.7.4 mod_update가 다시 바꾸지 않음) → (USB UNPIN) → 재부팅 → 패키지의 판(MOD_VER)
+echo "$KMJ231" | sed 's/2\.4\.2/2.4.1/' > $RB/hd/mods/wireless-carplay-aa/mod.json; rm -f $X/calls; : > $X/calls; rbmu
+check "  흐름: 고정된 2.4.1이면 재부팅 뒤 1.7.4 mod_update가 패키지의 판으로 다시 바꾸지 않음" 'grep -qx "rc=1" $RB/mu.out && ! grep -q "engine install" $X/calls 2>/dev/null'
+: > $RB/usb/kp-rollback/UNPIN; echo "2.4.2 3" > $RB/bk/mod.upd; rm -f $RB/usb/kp-rollback/RESULT.txt; rb; rm -f $RB/usb/kp-rollback/UNPIN
+check "  흐름: UNPIN이면 고정만 풂(mod.pin·mod.upd 지움), 설치 안 함, 결과 안내(1.7.4 리뷰: 약속하지 않는 문구)" '[ ! -f $RB/bk/mod.pin ] && [ ! -f $RB/bk/mod.upd ] && ! grep -q "engine install" $X/calls 2>/dev/null && rbres "고정을 풀었습니다. Korea Projection 1.7.4가 설치돼 있으면 재부팅 약 3분 뒤 새 판으로 다시 바뀝니다."'
+rm -f $X/calls; : > $X/calls; rbmu
+check "  흐름: 고정을 푼 뒤 재부팅하면 1.7.4 mod_update가 패키지의 판(MOD_VER, 2.4.3)을 설치(시도 1)" 'grep -q "hmgapid engine install .*/hmgapi/wireless-carplay-aa.zip" $X/calls && [ "$(cat $RB/bk/mod.upd)" = "$(sed -n "s/^MOD_VER=//p" $PKG/svc/hotspot.sh) 1" ]'
 for i in 1 2 3 4 5 6; do echo "1 boot0 old$i" >> $RB/notice; done; rb
-check "  알림 기록은 최근 5줄만 남고(1.7.2 notice와 같게) 임시 파일이 남지 않음" '[ "$(wc -l < $RB/notice | tr -d " ")" = 5 ] && ! grep -q old2 $RB/notice && grep -q old6 $RB/notice && ! ls $RB/notice.rb.* >/dev/null 2>&1'
-rbreset; echo "x" >> $RB/usb/kp-rollback/wireless-carplay-aa-2.4.0.zip; rb
+check "  알림 기록은 최근 5줄만 남고(1.7.3 notice와 같게) 임시 파일이 남지 않음" '[ "$(wc -l < $RB/notice | tr -d " ")" = 5 ] && ! grep -q old2 $RB/notice && grep -q old6 $RB/notice && ! ls $RB/notice.rb.* >/dev/null 2>&1'
+# 묶음 G(D-20): 베타 2(2.4.3) 차도 2.4.1로 되돌리고 고정한다(고정·적용·판 확인은 2.4.2와 같은 길). 그 뒤 패키지가 다시 바꾸지 않음
+# 베타 3: 2.4.4 차도 같은 길로 되돌린다. 1.7.4 정식: 2.4.5 차도
+for vf in 2.4.3 2.4.4 2.4.5; do
+rbreset; sed -i.bak "s/2\.4\.2/$vf/" $RB/hd/mods/wireless-carplay-aa/mod.json; rb
+check "묶음 G·베타 3: $vf → --force로 2.4.1 설치, 고정(내용 2.4.1), 적용, 설치 뒤 판 2.4.1, '되돌리고 고정했습니다'" 'grep -q "hmgapid engine install .*wireless-carplay-aa-2.4.1.zip --force" $X/calls && grep -qx "hmgapid engine apply" $X/calls && [ "$(cat $RB/bk/mod.pin)" = 2.4.1 ] && grep -q "\"version\": \"2.4.1\"" $RB/hd/mods/wireless-carplay-aa/mod.json && rbres "2.4.1로 되돌리고 고정했습니다. 내비를 재부팅"'
+rm -f $X/calls; : > $X/calls; rbmu
+check "  묶음 G·베타 3: $vf에서 되돌려 고정한 차는 재부팅 뒤 패키지 mod_update가 패키지 판으로 다시 바꾸지 않음" 'grep -qx "rc=1" $RB/mu.out && ! grep -q "engine install" $X/calls 2>/dev/null'
+rbreset; sed -i.bak "s/2\.4\.2/$vf/" $RB/hd/mods/wireless-carplay-aa/mod.json; touch $X/inst_fail; rb; rm -f $X/inst_fail
+check "  묶음 G·베타 3: $vf 차에서 엔진이 거부하면 고정하지 않고 지금 판($vf) 그대로라고 안내" '[ ! -f $RB/bk/mod.pin ] && ! grep -q "engine apply" $X/calls && grep -q "\"version\": \"$vf\"" $RB/hd/mods/wireless-carplay-aa/mod.json && rbres "지금 판($vf) 그대로"'
+done
+rbreset; echo "x" >> $RB/usb/kp-rollback/wireless-carplay-aa-2.4.1.zip; rb
 check "  zip이 맞지 않으면 아무것도 바꾸지 않음" '! grep -q "engine install" $X/calls 2>/dev/null && [ ! -f $RB/bk/mod.pin ] && rbres "맞지 않습니다"'
 rbreset; touch $X/inst_fail; rb; rm -f $X/inst_fail
-check "  엔진이 거부하면 고정하지 않고 지금 판 그대로라고 안내" '[ ! -f $RB/bk/mod.pin ] && ! grep -q "engine apply" $X/calls && rbres "지금 판(2.4.1) 그대로"'
+check "  엔진이 거부하면 고정하지 않고 지금 판 그대로라고 안내" '[ ! -f $RB/bk/mod.pin ] && ! grep -q "engine apply" $X/calls && rbres "지금 판(2.4.2) 그대로"'
 rbreset; echo '{"id": "wireless-carplay-aa", "version": "2.2.0", "system": [{"region": "USA"}]}' > $RB/hd/mods/wireless-carplay-aa/mod.json; rb
 check "  한국 차 항목이 없는 다른 판은 덮어쓰지 않음" '! grep -q "engine install" $X/calls 2>/dev/null && rbres "Korea Projection 것이 아닙니다"'
-rbreset; sed -i.bak 's/2\.4\.1/2.4.0/' $RB/hd/mods/wireless-carplay-aa/mod.json; rb
-check "  1.7.3(K-9): 이미 2.4.0(1.7.2 판)이면 설치도 고정도 하지 않음(아무것도 안 함)" '! grep -q "engine install" $X/calls 2>/dev/null && [ ! -f $RB/bk/mod.pin ] && rbres "지금 무선 모드는 이미 2.4.0입니다. 아무것도 바꾸지 않았습니다"'
-rbreset; sed -i.bak 's/2\.4\.1/2.4.0/' $RB/hd/mods/wireless-carplay-aa/mod.json; : > $RB/bk/mod.pin; rb
-check "  이미 2.4.0으로 고정된 차는 설치하지 않고(고정 유지), 마지막 묶음 중간 3②: 남은 적용이 있으면 이어서 적용" '! grep -q "engine install" $X/calls 2>/dev/null && [ -f $RB/bk/mod.pin ] && grep -qx "hmgapid engine apply" $X/calls && rbres "이미 2.4.0으로 고정되어 있어 남은 적용을 마쳤습니다"'
-rbreset; sed -i.bak 's/2\.4\.1/2.4.0/' $RB/hd/mods/wireless-carplay-aa/mod.json; : > $RB/bk/mod.pin; printf '%s\n' "$PLAN_SAME" > $X/plan; rb
-check "  마지막 묶음 중간 3②: 이미 2.4.0·고정이고 적용할 것이 없으면 아무것도 바꾸지 않음(설치·적용 없음)" '! grep -q "engine install" $X/calls 2>/dev/null && ! grep -qx "hmgapid engine apply" $X/calls && [ -f $RB/bk/mod.pin ] && rbres "이미 2.4.0으로 고정되어 있습니다. 아무것도 바꾸지 않았습니다."'
-rbreset; sed -i.bak 's/2\.4\.1/2.4.0/' $RB/hd/mods/wireless-carplay-aa/mod.json; : > $RB/bk/mod.pin; printf '%s\n' "change   /system/app/X.apk [other-mod] -> 1   [restart the app]" > $X/plan; rb
-check "  마지막 묶음 중간 3②: 이미 고정인데 다른 모드 변경이 있으면 적용하지 않고 앱에서 적용하라고 안내" '! grep -qx "hmgapid engine apply" $X/calls && rbres "이미 2.4.0으로 고정되어 있습니다. HMG-API 앱에서 변경 사항을 적용"'
+rbreset; sed -i.bak 's/2\.4\.2/2.4.1/' $RB/hd/mods/wireless-carplay-aa/mod.json; rb
+check "  1.7.4(K-9): 이미 2.4.1(1.7.3 판)이면 설치도 고정도 하지 않음(아무것도 안 함)" '! grep -q "engine install" $X/calls 2>/dev/null && [ ! -f $RB/bk/mod.pin ] && rbres "지금 무선 모드는 이미 2.4.1입니다. 아무것도 바꾸지 않았습니다"'
+rbreset; sed -i.bak 's/2\.4\.2/2.4.1/' $RB/hd/mods/wireless-carplay-aa/mod.json; : > $RB/bk/mod.pin; rb
+check "  이미 2.4.1로 고정된 차는 설치하지 않고(고정 유지), 마지막 묶음 중간 3②: 남은 적용이 있으면 이어서 적용" '! grep -q "engine install" $X/calls 2>/dev/null && [ -f $RB/bk/mod.pin ] && grep -qx "hmgapid engine apply" $X/calls && rbres "이미 2.4.1로 고정되어 있어 남은 적용을 마쳤습니다"'
+rbreset; sed -i.bak 's/2\.4\.2/2.4.1/' $RB/hd/mods/wireless-carplay-aa/mod.json; : > $RB/bk/mod.pin; printf '%s\n' "$PLAN_SAME" > $X/plan; rb
+check "  마지막 묶음 중간 3②: 이미 2.4.1·고정이고 적용할 것이 없으면 아무것도 바꾸지 않음(설치·적용 없음)" '! grep -q "engine install" $X/calls 2>/dev/null && ! grep -qx "hmgapid engine apply" $X/calls && [ -f $RB/bk/mod.pin ] && rbres "이미 2.4.1로 고정되어 있습니다. 아무것도 바꾸지 않았습니다."'
+rbreset; sed -i.bak 's/2\.4\.2/2.4.1/' $RB/hd/mods/wireless-carplay-aa/mod.json; : > $RB/bk/mod.pin; printf '%s\n' "change   /system/app/X.apk [other-mod] -> 1   [restart the app]" > $X/plan; rb
+check "  마지막 묶음 중간 3②: 이미 고정인데 다른 모드 변경이 있으면 적용하지 않고 앱에서 적용하라고 안내" '! grep -qx "hmgapid engine apply" $X/calls && rbres "이미 2.4.1로 고정되어 있습니다. HMG-API 앱에서 변경 사항을 적용"'
 rbreset; : > $RB/bk/mod.pin; touch $X/inst_fail; rb; rm -f $X/inst_fail
-check "  마지막 묶음 중간 3①: 2.4.1 차에 전에 쓴 고정이 남아 있어도 설치가 실패하면 고정을 지움(새 판으로 못 가는 길 막음)" 'grep -q "engine install" $X/calls && [ ! -f $RB/bk/mod.pin ] && rbres "HMG-API가 거부해 되돌리지 못했습니다"'
+check "  마지막 묶음 중간 3①: 2.4.2 차에 전에 쓴 고정이 남아 있어도 설치가 실패하면 고정을 지움(새 판으로 못 가는 길 막음)" 'grep -q "engine install" $X/calls && [ ! -f $RB/bk/mod.pin ] && rbres "HMG-API가 거부해 되돌리지 못했습니다"'
 rbreset; printf '%s\n' "$PLAN_SAME" "WARNING: the car's ADB TCP switch is on" > $X/plan; rb
 check "  마지막 묶음 L3: 계획이 same 줄과 WARNING 줄뿐이면 적용할 것 없음(적용 안 함, 재부팅 안내)" '! grep -qx "hmgapid engine apply" $X/calls && rbres "되돌리고 고정했습니다"'
+# 1.7.4(D-12): 고정 파일을 못 쓰면 설치 전에 멈춤(엔진 설치 명령을 한 번도 부르지 않고 판은 그대로)
+rbreset; chmod 555 $RB/bk; rb; chmod 755 $RB/bk
+check "1.7.4 D-12: 백업 폴더에 고정 파일을 못 쓰면 설치하지 않고 멈춤, 판 2.4.2 그대로, 안내 문구" '! grep -q "engine" $X/calls 2>/dev/null && [ ! -f $RB/bk/mod.pin ] && grep -q "\"version\": \"2.4.2\"" $RB/hd/mods/wireless-carplay-aa/mod.json && rbres "고정 파일을 쓰지 못해 되돌리지 않았습니다. 지금 판(2.4.2) 그대로입니다. USB의 kp-rollback 폴더를 보내 주세요."'
+rbreset; echo 2.4.0 > $RB/bk/mod.pin; chmod 444 $RB/bk/mod.pin; chmod 555 $RB/bk; rb; chmod 755 $RB/bk; chmod 644 $RB/bk/mod.pin
+check "  D-12: 옛 고정(2.4.0)이 남아 덮어쓰지 못해도(내용이 2.4.1이 아님) 설치하지 않음" '! grep -q "engine install" $X/calls 2>/dev/null && grep -q "\"version\": \"2.4.2\"" $RB/hd/mods/wireless-carplay-aa/mod.json && rbres "고정 파일을 쓰지 못해 되돌리지 않았습니다"'
+rbreset; rb
+check "  D-12: 정상 경로는 그대로(고정 파일 내용 2.4.1, 설치·적용)" '[ "$(cat $RB/bk/mod.pin)" = 2.4.1 ] && grep -q "engine install" $X/calls && grep -qx "hmgapid engine apply" $X/calls && rbres "되돌리고 고정했습니다"'
+check "  D-12: 안내서에 고정 파일 실패 문구가 있음" 'grep -q "고정 파일을 쓰지 못해 되돌리지 않았습니다" $B/usb-modrollback/GUIDE-ko.md'
 # 되돌리기 USB 최종(중간 1): 계획 명령이 실패해 오류 줄만 내거나 아무것도 내지 않으면 적용하지 않고, 그때 판·고정을 알림
 rbreset; touch $X/plan_fail; rb; rm -f $X/plan_fail
-check "  되돌리기 최종 중간 1: 계획 명령이 실패하면(오류 줄만) 적용하지 않고 '계획을 확인하지 못해'와 지금 판·고정을 알림" '! grep -qx "hmgapid engine apply" $X/calls && grep -q "engine install" $X/calls && rbres "HMG-API 계획을 확인하지 못해 적용하지 않았습니다(무선 모드 2.4.0, 고정 있음)"'
+check "  되돌리기 최종 중간 1: 계획 명령이 실패하면(오류 줄만) 적용하지 않고 '계획을 확인하지 못해'와 지금 판·고정을 알림" '! grep -qx "hmgapid engine apply" $X/calls && grep -q "engine install" $X/calls && rbres "HMG-API 계획을 확인하지 못해 적용하지 않았습니다(무선 모드 2.4.1, 고정 있음)"'
 rbreset; : > $X/plan; rb
 check "  되돌리기 최종 중간 1: 계획이 빈 출력이면 '되돌리고 고정했습니다'라 하지 않고 확인하지 못했다고 알림" '! grep -qx "hmgapid engine apply" $X/calls && rbres "HMG-API 계획을 확인하지 못해" && ! grep -q "되돌리고 고정했습니다" $RB/usb/kp-rollback/RESULT.txt'
-rbreset; sed -i.bak 's/2\.4\.1/2.4.0/' $RB/hd/mods/wireless-carplay-aa/mod.json; : > $RB/bk/mod.pin; touch $X/plan_fail; rb; rm -f $X/plan_fail
-check "  되돌리기 최종 중간 1: 이어서 하기(이미 2.4.0·고정)에서도 계획 실패면 적용하지 않음" '! grep -qx "hmgapid engine apply" $X/calls && rbres "HMG-API 계획을 확인하지 못해 적용하지 않았습니다(무선 모드 2.4.0, 고정 있음)"'
+rbreset; sed -i.bak 's/2\.4\.2/2.4.1/' $RB/hd/mods/wireless-carplay-aa/mod.json; : > $RB/bk/mod.pin; touch $X/plan_fail; rb; rm -f $X/plan_fail
+check "  되돌리기 최종 중간 1: 이어서 하기(이미 2.4.1·고정)에서도 계획 실패면 적용하지 않음" '! grep -qx "hmgapid engine apply" $X/calls && rbres "HMG-API 계획을 확인하지 못해 적용하지 않았습니다(무선 모드 2.4.1, 고정 있음)"'
 # 되돌리기 최종(낮음 2): 설치했다는데 판이 그대로면 고정을 풀고 실패로 알림, 'nothing changed … problem'은 문제로 봄
 rbreset; touch $X/inst_noop; rb; rm -f $X/inst_noop
-check "  되돌리기 최종 낮음 2: 설치 뒤에도 판이 2.4.0이 아니면 고정을 풀고 '바꾸지 못했습니다'(되돌리고 고정했다고 하지 않음, 적용 안 함)" '[ ! -f $RB/bk/mod.pin ] && ! grep -qx "hmgapid engine apply" $X/calls && rbres "무선 모드를 2.4.0으로 바꾸지 못했습니다(지금 2.4.1, 고정은 풀었습니다)"'
+check "  되돌리기 최종 낮음 2: 설치 뒤에도 판이 2.4.1이 아니면 고정을 풀고 '바꾸지 못했습니다'(되돌리고 고정했다고 하지 않음, 적용 안 함)" '[ ! -f $RB/bk/mod.pin ] && ! grep -qx "hmgapid engine apply" $X/calls && rbres "무선 모드를 2.4.1로 바꾸지 못했습니다(지금 2.4.2, 고정은 풀었습니다)"'
 rbreset; echo "nothing changed (1 problem)" > $X/plan; rb
 check "  되돌리기 최종 낮음 2: 'nothing changed … problem'은 할 일 없음이 아니라 문제(적용하지 않고 앱에서 확인 안내)" '! grep -qx "hmgapid engine apply" $X/calls && rbres "HMG-API 앱에서 변경 사항을 적용" && ! grep -q "되돌리고 고정했습니다" $RB/usb/kp-rollback/RESULT.txt'
 rbreset; rb
-check "  되돌리기 최종: 정상 흐름은 설치 뒤 판이 2.4.0인 것을 확인하고 '되돌리고 고정했습니다'(시험의 가짜 엔진이 판을 실제로 바꿈)" 'grep -q "\"version\": \"2.4.0\"" $RB/hd/mods/wireless-carplay-aa/mod.json && [ -f $RB/bk/mod.pin ] && rbres "되돌리고 고정했습니다"'
-# 1.7.3(K-9): 1.7.2 판(2.3.x)과 다른 판은 바꾸지도 고정하지도 않는다(옛 판을 2.4.0으로 올리거나 다음 판을 내리지 않음)
-for v in 2.1.0 2.3.0 2.3.1 2.3.4 2.4.2 2.5.0 '2.4.1-x"name'; do
-  rbreset; echo "$KMJ231" | sed "s/2\.4\.1/$v/" > $RB/hd/mods/wireless-carplay-aa/mod.json; rb
-  check "  되돌리는 판이 아닌 $v는 바꾸지 않고 고정도 안 함" '! grep -q "engine install" $X/calls 2>/dev/null && [ ! -f $RB/bk/mod.pin ] && rbres "이 USB가 되돌리는 판(1.7.3의 2.4.1)이 아닙니다" && ! grep -q "name" $RB/usb/kp-rollback/RESULT.txt'
+check "  되돌리기 최종: 정상 흐름은 설치 뒤 판이 2.4.1인 것을 확인하고 '되돌리고 고정했습니다'(시험의 가짜 엔진이 판을 실제로 바꿈)" 'grep -q "\"version\": \"2.4.1\"" $RB/hd/mods/wireless-carplay-aa/mod.json && [ -f $RB/bk/mod.pin ] && rbres "되돌리고 고정했습니다"'
+# 1.7.4(K-9): 1.7.3 판(2.3.x)과 다른 판은 바꾸지도 고정하지도 않는다(옛 판을 2.4.1로 올리거나 다음 판을 내리지 않음)
+for v in 2.1.0 2.3.0 2.3.1 2.4.0 2.4.6 2.5.0 '2.4.2-x"name' '2.4.3-x"name' '2.4.4-x"name' '2.4.5-x"name'; do
+  rbreset; echo "$KMJ231" | sed "s/2\.4\.2/$v/" > $RB/hd/mods/wireless-carplay-aa/mod.json; rb
+  check "  되돌리는 판이 아닌 $v는 바꾸지 않고 고정도 안 함" '! grep -q "engine install" $X/calls 2>/dev/null && [ ! -f $RB/bk/mod.pin ] && rbres "이 USB가 되돌리는 판(1.7.4의 2.4.2·2.4.3·2.4.4·2.4.5)이 아닙니다" && ! grep -q "name" $RB/usb/kp-rollback/RESULT.txt'
 done
 # 6단계 리뷰 L7: 고정 표시는 설치 전에 쓰고(설치 중 패키지 서비스가 끼어들지 않게), 설치가 실패하면 지움
+# 리뷰 반영(D 낮음 9): KP_FROM_DATA 없이 꽂힌 경우 스크립트를 내비 작업 폴더(D)로 복사한 뒤 거기서 다시 돌아 끝까지 감
+rbreset; sed "s#^export PATH=.*#export PATH=$X/bin:$T/bin:/usr/bin:/bin:/sbin#" $RBS > $RB/usb/NEMESIS.sh
+(BB=$T/bin/bb U=$RB/usb D=$RB/d3 HMGDATA=$RB/hd BK=$RB/bk MOUNTS=$RB/mounts KW=$RB/kw PROC=$RB/proc BOOT_ID=$RB/bootid NOTICE=$RB/notice sh $RB/usb/NEMESIS.sh) > $RB/out 2>&1
+check "  1.7.4 리뷰: KP_FROM_DATA 없이 돌면 내비 작업 폴더로 복사(run.sh)한 뒤 거기서 다시 돌아 되돌리기·결과를 끝냄" 'cmp -s $RB/usb/NEMESIS.sh $RB/d3/run.sh && [ "$(cat $RB/bk/mod.pin)" = 2.4.1 ] && rbres "무선 모드를 2.4.1로 되돌리고 고정했습니다"'
+# 1.7.4(B-8 ②): 고정 파일에 고정한 판 번호(2.4.1)를 적음
+rbreset; rb
+check "  1.7.4 B-8 ②: 되돌린 뒤 고정 파일(mod.pin) 내용이 고정한 판 번호 2.4.1" '[ "$(cat $RB/bk/mod.pin)" = 2.4.1 ] && rbres "무선 모드를 2.4.1로 되돌리고 고정했습니다"'
+# 1.7.4(B-8 ②): 1.7.3 USB로 2.4.0에 고정된 차(빈 mod.pin)가 1.7.4를 올리면 mod_update는 모드를 바꾸지 않음(고정 그대로)
+rbreset; echo "$KMJ231" | sed 's/2\.4\.2/2.4.0/' > $RB/hd/mods/wireless-carplay-aa/mod.json; : > $RB/bk/mod.pin; rbmu
+check "  1.7.4 B-8 ②: 1.7.3 USB가 2.4.0에 고정한 차(빈 mod.pin)는 1.7.4가 모드를 바꾸지 않음(설치 없음, 고정 파일 그대로 비어 있음)" 'grep -qx "rc=1" $RB/mu.out && ! grep -q "engine install" $X/calls && [ -f $RB/bk/mod.pin ] && [ ! -s $RB/bk/mod.pin ]'
+# 1.7.4: 중간에 뽑힘 → 다시 꽂음. ① 실행 중 USB가 빠지면(마운트 없음) 내비 쪽 일은 끝까지 하고 USB에는 쓰지 않음
+rbreset; : > $RB/mounts; rb
+check "  1.7.4: 실행 중 USB가 빠지면 되돌리기·고정은 끝내고 USB에는 결과를 쓰지 않음(상태 화면 알림에는 남음)" '[ "$(cat $RB/bk/mod.pin)" = 2.4.1 ] && [ ! -f $RB/usb/kp-rollback/RESULT.txt ] && grep -q "되돌리기 USB: 무선 모드를 2.4.1로 되돌리고 고정했습니다" $RB/notice'
+# ② 설치는 됐는데(2.4.1·고정) 적용 전에 끝난 차를 다시 꽂으면 설치 없이 이어서 적용, 고정 유지
+rbreset; echo "$KMJ231" | sed 's/2\.4\.2/2.4.1/' > $RB/hd/mods/wireless-carplay-aa/mod.json; echo 2.4.1 > $RB/bk/mod.pin; rb
+check "  1.7.4: 다시 꽂으면(2.4.1·고정) 설치 없이 남은 적용을 이어서 하고 고정 유지" 'grep -qx "hmgapid engine apply" $X/calls && [ "$(cat $RB/bk/mod.pin)" = 2.4.1 ] && ! grep -q "engine install" $X/calls && rbres "이미 2.4.1로 고정되어 있어 남은 적용을 마쳤습니다"'
 rbreset; rb
 check "  6단계 리뷰 L7: 고정(mod.pin)은 엔진 설치 **전에** 있음" 'grep -qx "pin-at-install" $X/calls && [ -f $RB/bk/mod.pin ]'
 rbreset; touch $X/inst_fail; rb; rm -f $X/inst_fail
@@ -1006,7 +1151,7 @@ check "  6단계 리뷰 L8: usb1에서 돌면 U=/storage/usb1, usb0이면 usb0, 
 echo \$U" /storage/usb1/NEMESIS.sh)" = /storage/usb1 ] && [ "$(U= sh -c "$RBU
 echo \$U" /storage/usb0/NEMESIS.sh)" = /storage/usb0 ] && [ "$(U=/x/y sh -c "$RBU
 echo \$U" /storage/usb1/NEMESIS.sh)" = /x/y ] && [ -n "$RBU" ]'
-rbreset; : > $RB/bk/mod.pin; echo 2.4.1 > $RB/bk/mod.upd; : > $RB/usb/kp-rollback/UNPIN; rb
+rbreset; : > $RB/bk/mod.pin; echo 2.4.2 > $RB/bk/mod.upd; : > $RB/usb/kp-rollback/UNPIN; rb
 check "  UNPIN 파일이 있으면 고정만 풂(mod.pin·mod.upd 지움), 설치 안 함" '[ ! -f $RB/bk/mod.pin ] && [ ! -f $RB/bk/mod.upd ] && ! grep -q "engine install" $X/calls 2>/dev/null'
 rbreset; touch $X/down; rb; rm -f $X/down
 check "  HMG-API가 응답하지 않으면 아무것도 바꾸지 않음" '! grep -q "engine install" $X/calls && [ ! -f $RB/bk/mod.pin ] && rbres "HMG-API가 응답하지 않아"'
@@ -1017,7 +1162,7 @@ check "  계획이 'nothing changed'면 적용 없이 재부팅 안내" '! grep 
 rbreset; printf '%s\n' "$PLAN_OK" "change   /system/app/X.apk [other-mod] -> 1   [restart the app]" > $X/plan; rb
 check "  계획에 다른 모드 변경이 있으면 적용하지 않고 앱에서 적용하라고 안내(고정은 함)" '! grep -qx "hmgapid engine apply" $X/calls && [ -f $RB/bk/mod.pin ] && rbres "HMG-API 앱에서 변경 사항을 적용"'
 rbreset; printf '%s\n' "setting  prop/persist.sys.iap2.wifi back to stock [wireless-carplay-aa]" > $X/plan; rb
-check "  계획에 'back to stock'이 있으면 적용하지 않음(1.7.2 plan_only_mod와 같게)" '! grep -qx "hmgapid engine apply" $X/calls && rbres "HMG-API 앱에서 변경 사항을 적용"'
+check "  계획에 'back to stock'이 있으면 적용하지 않음(1.7.3 plan_only_mod와 같게)" '! grep -qx "hmgapid engine apply" $X/calls && rbres "HMG-API 앱에서 변경 사항을 적용"'
 rbreset; rm -f $RB/bk/mod.ours; rb
 check "  Korea Projection이 넣은 모드가 아니면(mod.ours 없음) 바꾸지 않음" '! grep -q "engine install" $X/calls 2>/dev/null && [ ! -f $RB/bk/mod.pin ] && rbres "Korea Projection 것이 아닙니다"'
 rbreset; mkdir -p $RB/proc/4321; echo "4321 boot1" > $RB/kw/fix.pid; rb
@@ -1031,13 +1176,13 @@ check "  무선 모드가 없으면 아무것도 바꾸지 않음" '! grep -q "e
 # 재리뷰 M: busybox가 없는 내비(K3·K8). 패키지에 든 busybox를 쓰고, 그것도 없으면 바꾸지 않고 결과만 남김
 rbx() { sed "s#^export PATH=.*#export PATH=$X/bin:$T/bin:/usr/bin:/bin:/sbin#" $RBS > $RB/run.sh; (KP_FROM_DATA=1 BB= BB_SYS=$RB/nobb BB_OWN=$1 U=$RB/usb D=$RB/d HMGDATA=$RB/hd BK=$RB/bk MOUNTS=$RB/mounts KW=$RB/kw PROC=$RB/proc BOOT_ID=$RB/bootid NOTICE=$RB/notice sh $RB/run.sh) > $RB/out 2>&1; }
 rbreset; rbx $T/bin/bb
-check "  재리뷰 M: 내비에 busybox가 없으면 패키지에 든 busybox로 되돌림" 'grep -q "hmgapid engine install .*wireless-carplay-aa-2.4.0.zip --force" $X/calls && [ -f $RB/bk/mod.pin ] && rbres "되돌리고 고정했습니다"'
+check "  재리뷰 M: 내비에 busybox가 없으면 패키지에 든 busybox로 되돌림" 'grep -q "hmgapid engine install .*wireless-carplay-aa-2.4.1.zip --force" $X/calls && [ -f $RB/bk/mod.pin ] && rbres "되돌리고 고정했습니다"'
 rbreset; rbx $RB/nobb2
 check "  busybox가 하나도 없으면 아무것도 바꾸지 않고 RESULT.txt·상태 화면에 이유를 남김" '! grep -q "engine" $X/calls 2>/dev/null && [ ! -f $RB/bk/mod.pin ] && rbres "busybox를 찾지 못해" && [ "$(stat -f %Lp $RB/notice)" = 644 ]'
-rbreset; echo old > $RB/d/out/install.txt 2>/dev/null || { mkdir -p $RB/d/out; echo old > $RB/d/out/install.txt; }; touch $X/down; rb; rm -f $X/down
+rbreset; mkdir -p $RB/d/out; echo old > $RB/d/out/install.txt; touch $X/down; rb; rm -f $X/down
 check "  재리뷰 L: 지난 실행의 기록(install.txt 등)은 USB로 다시 가지 않음" '[ ! -f $RB/usb/kp-rollback/log/install.txt ]'
-rbreset; sed -i.bak 's/2\.4\.1/2.4.0/' $RB/hd/mods/wireless-carplay-aa/mod.json; rm -f $RB/bk/mod.ours; rb
-check "  재리뷰 L: 2.4.0이어도 Korea Projection 것이 아니면 고정했다고 하지 않음" '[ ! -f $RB/bk/mod.pin ] && rbres "Korea Projection 것이 아닙니다"'
+rbreset; sed -i.bak 's/2\.4\.2/2.4.1/' $RB/hd/mods/wireless-carplay-aa/mod.json; rm -f $RB/bk/mod.ours; rb
+check "  재리뷰 L: 2.4.1이어도 Korea Projection 것이 아니면 고정했다고 하지 않음" '[ ! -f $RB/bk/mod.pin ] && rbres "Korea Projection 것이 아닙니다"'
 check "  USB 안내서에 NQ5 차주는 쓰지 말라는 주의가 있음" 'grep -q "NQ5" $B/usb-modrollback/GUIDE-ko.md && grep -q "쓰지 마세요" $B/usb-modrollback/GUIDE-ko.md'
 rm -rf $RB
 else
@@ -1050,9 +1195,9 @@ check "  'won't load' 줄이 있으면 적용 안 함" '! grep -qx "hmgapid engi
 asreset; touch $X/vm_fail; as > $X/out
 check "지도 확인에 실패하면 무선 모드를 설치·적용하지 않음" '! grep -q "engine install" $X/calls && ! grep -q "engine apply" $X/calls && [ ! -f $X/bk/mod.tried ]'
 check "  확인에 실패한 지도는 다시 빼고(임시 폴더도 없음) map.bad에 폴더와 md5를 남김" '[ ! -d $NM ] && [ ! -d $X/hd/maps/.kp-tmp ] && grep -qx "kia/niro/kor/260902 $(md5 -q $T/app/hmgapi/maps/kia/niro/kor/260902/car.json)" $X/bk/map.bad'
-rm -f $X/vm_fail $X/calls $T/notice; as > $X/out
+rm -f $X/vm_fail $X/calls $T/notice; : > $X/calls; as > $X/out
 check "  다음 부팅: 같은 지도는 다시 넣지 않고, 확인·모드 설치도 안 함, 알림 없음" '[ ! -d $NM ] && ! grep -q -E "verify-map|engine install" $X/calls && [ ! -f $T/notice ] && grep -q "지도 확인에 실패한 지도" $X/out'
-echo "kia/niro/kor/260902 0123456789abcdef0123456789abcdef" > $X/bk/map.bad; rm -f $X/calls; as > $X/out
+echo "kia/niro/kor/260902 0123456789abcdef0123456789abcdef" > $X/bk/map.bad; rm -f $X/calls; : > $X/calls; as > $X/out
 check "  지도가 바뀐 새 버전이면(md5 다름) 다시 넣고 확인" '[ -f $NM/car.json ] && grep -qx "hmgapid engine verify-map" $X/calls && grep -q "engine install" $X/calls'
 asreset; echo "kia/niro/kor/260902 $(md5 -q $T/app/hmgapi/maps/kia/niro/kor/260902/car.json)" > $X/bk/map.bad; mkdir -p $NM; echo official > $NM/car.json; as > $X/out
 check "  실패 기록이 있어도 같은 폴더에 다른 지도(공식판 등)가 생기면 그 지도로 모드 설치" '[ "$(cat $NM/car.json)" = official ] && grep -q "engine install" $X/calls'
@@ -1066,9 +1211,9 @@ rm -rf $X/kh
 asreset; mkdir -p $X/w; : > $X/w/x; (cd $X/w && PATH=$X/bin:$T/bin:/usr/bin:/bin:/sbin HOTSPOT_LIB=1 BB=$T/bin/bb W=$X/w BK=$X/bk HMGDATA=$X/hd KP_HMG=$T/app/hmgapi sh -c '. '$T'/app/svc/hotspot.sh; export PATH='$X'/bin:'$T'/bin:/usr/bin:/bin:/sbin; setup_hmgapi') > $X/out
 check "  현재 폴더에 한 글자 파일이 있어도 [wireless-carplay-aa]를 그대로 비교" 'grep -qx "hmgapid engine apply" $X/calls'
 asreset; touch $X/apply_fail; as > $X/out
-check "적용 실패 → 안내 (재시작 안내 없음)" 'grep -q "적용에 실패" $T/notice && ! grep -q "마쳤습니다" $T/notice'
+check "적용 실패 → 안내 (재시작 안내 없음)" 'grep -q "적용에 실패" $T/notice && ! grep -q "마쳤습니다" $T/notice 2>/dev/null'
 asreset; touch $X/vm_fail; rm -f $X/plan; : > $X/plan; mkdir -p $X/hd/mods/wireless-carplay-aa; echo '{}' > $X/hd/mods/wireless-carplay-aa/mod.json; as > $X/out
-check "지도 확인 실패 → 안내, 재시작 안내 없음" 'grep -q "지도 확인에 실패" $T/notice && ! grep -q "마쳤습니다" $T/notice'
+check "지도 확인 실패 → 안내, 재시작 안내 없음" 'grep -q "지도 확인에 실패" $T/notice && ! grep -q "마쳤습니다" $T/notice 2>/dev/null'
 asreset; cp $T/app/hmgapi/wireless-carplay-aa.zip $X/bad.zip; echo x >> $X/bad.zip; (PATH=$X/bin:$T/bin:/usr/bin:/bin:/sbin HOTSPOT_LIB=1 BB=$T/bin/bb W=$X/w BK=$X/bk HMGDATA=$X/hd KP_HMG=$X/kh sh -c 'mkdir -p '$X'/kh/maps; cp '$X'/bad.zip '$X'/kh/wireless-carplay-aa.zip; . '$T'/app/svc/hotspot.sh; export PATH='$X'/bin:'$T'/bin:/usr/bin:/bin:/sbin; setup_hmgapi') > $X/out
 check "패키지의 모드 zip md5가 다르면 설치 안 함" '! grep -q "engine install" $X/calls && grep -q "md5가 다름" $X/out'
 asreset; rm -rf $X/hd/maps; as > $X/out
@@ -1092,14 +1237,18 @@ check "  쏘나타라도 펌웨어가 다르면 자동 시험: 우리 쏘나타 
 AM=$X/hd/maps/unknown/testx/kor/260101
 asreset; echo TESTX.KOR.0000.V039.001.260101 > $T/product; as > $X/out
 check "자동 시험: 목록에 없는 한국 차는 HMG-API가 차에서 지도를 만들고 확인한 뒤 모드 설치·적용, 시험 알림" '[ -f $AM/car.json ] && grep -qx "unknown/testx/kor/260101" $X/bk/map.ours && grep -qx "hmgapid engine verify-map" $X/calls && grep -q "engine install" $X/calls && grep -qx "hmgapid engine apply" $X/calls && grep -q "자동으로 설정한 차" $T/notice && [ ! -d $NM ]'
-rm -f $X/calls $T/notice; as > $X/out
+rm -f $X/calls $T/notice; : > $X/calls; as > $X/out
 check "  다시 부팅: 지도가 있으면 다시 만들지 않고 다시 확인도 안 함" '! grep -q -E "map-car|verify-map|engine install" $X/calls'
-rm -rf $X/hd/maps/unknown; rm -f $X/calls; as > $X/out
+rm -rf $X/hd/maps/unknown; rm -f $X/calls; : > $X/calls; as > $X/out
 check "  HMG-API 업데이트로 지도 폴더가 바뀌면 다시 만들고 확인" '[ -f $AM/car.json ] && grep -q "map-car --write" $X/calls && grep -qx "hmgapid engine verify-map" $X/calls'
 asreset; touch $X/vm_fail; as > $X/out
 check "  만든 지도의 확인이 실패하면 그 지도를 지우고 automap.bad, 모드 설치 안 함" '[ ! -d $AM ] && [ -f $X/bk/automap.bad ] && ! grep -q "engine install" $X/calls && grep -q "지도 확인에 실패" $T/notice'
-rm -f $X/vm_fail $X/calls $T/notice; as > $X/out
+rm -f $X/vm_fail $X/calls $T/notice; : > $X/calls; as > $X/out
 check "  다음 부팅: 실패 기록이 있으면 지도도 모드도 다시 하지 않음, 알림 없음" '! grep -q -E "map-car|verify-map|engine install" $X/calls && [ ! -f $T/notice ]'
+# 1.7.4 B-9(#74): HMG-API를 다시 설치해 이 차 지도(공식판 등)가 생겨도 automap.bad가 남아 있으면 다시 하지 않음(지금 동작 기록)
+mkdir -p $X/hd/maps/hyundai/testx/kor/260101; echo own > $X/hd/maps/hyundai/testx/kor/260101/car.json; rm -f $X/calls; : > $X/calls; as > $X/out
+check "1.7.4 B-9: automap.bad가 있으면 HMG-API에 이 차 지도가 새로 생겨도 확인·모드 설치를 다시 하지 않음(기록은 HMG-API 다시 설치로 지워지지 않음)" '[ -f $X/bk/automap.bad ] && ! grep -q -E "map-car|verify-map|engine install" $X/calls 2>/dev/null && grep -q "실패한 기록이 있어 무선 모드를 넣지 않음" $X/out'
+rm -rf $X/hd/maps/hyundai
 asreset; mkdir -p $X/hd/maps/hyundai/testx/kor/260101; echo own > $X/hd/maps/hyundai/testx/kor/260101/car.json; as > $X/out
 check "  차에 이 차 지도가 이미 있으면(차주·공식판) 만들지 않고 한 번 확인만, 실패해도 지우지 않음" '! grep -q map-car $X/calls && [ "$(grep -c verify-map $X/calls)" = 1 ] && [ -f $X/bk/automap.checked ]'
 asreset; mkdir -p $X/hd/maps/hyundai/testx/kor/260101; echo own > $X/hd/maps/hyundai/testx/kor/260101/car.json; touch $X/vm_fail; as > $X/out
@@ -1177,7 +1326,7 @@ skrun() { (PATH=$SK/bin:$T/bin:/usr/bin:/bin:/sbin env HOTSPOT_LIB=1 NOTICE=$SK/
 # 우리 것을 하나도 하지 않았는가(svc wifi, hostapd·dnsmasq 시작, kill, Wi-Fi 잠금 파일)
 noours() { ! grep -q -E "^(svc|hostapd|dnsmasq|kill|killall) " $SK/calls 2>/dev/null && [ "$(stat -f %Lp $SK/wifi/wpa_supplicant.conf)" = 644 ] && [ "$(cat $SK/wifi/wpa_supplicant.conf)" = "ctrl_interface=wlan0" ] && [ -z "$(ls $SK/wifi | grep -v "^wpa_supplicant.conf$")" ]; }
 skreset; stockps > $SK/ps; skrun SKW=3
-check "1.6.2: 시험 차(K3) + 순정 카플레이 AP → 준비됨(내비 Wi-Fi 사용), 진행 기록 done" 'grep -q "순정 카플레이 AP 사용: 우리 핫스팟을 켜지 않음 (카플레이 SSID 길이 7 일치)" $SK/out && grep -qx "state=done" $SK/prog && grep -qx "stage=무선 카플레이 준비됨(내비 Wi-Fi 사용). 아이폰을 연결해 보세요." $SK/prog'
+check "1.6.2·1.7.4 소유자 문구: 시험 차(K3) + 순정 카플레이 AP → 진행 기록 done '무선 카플레이·안드로이드 오토 준비됨.'(AA 안 끈 차)" 'grep -q "순정 카플레이 AP 사용: 우리 핫스팟을 켜지 않음 (카플레이 SSID 길이 7 일치)" $SK/out && grep -qx "state=done" $SK/prog && grep -qx "stage=무선 카플레이·안드로이드 오토 준비됨." $SK/prog'
 check "  우리 hostapd·dnsmasq·svc wifi·Wi-Fi 잠금·kill 없음, 순정 AP 기록(stockap.seen)" 'noours && [ -f $SK/bk/stockap.seen ]'
 check "  반복 없음: 3번 대기해도 로그는 처음 한 줄, '대기: 다른 hostapd' 없음, 60초 대기로 끝나지 않음(rc 7)" '[ "$(grep -c "순정 카플레이 AP" $SK/out)" = 1 ] && ! grep -q "대기: 다른 hostapd" $SK/out && grep -qx "rc=7" $SK/out'
 check "  SSID·비밀번호 값은 로그·진행 기록에 없음(길이만)" '! grep -q -F -e "SSID\\cX" -e "HotspotName1" -e "word77x" -e "word99" $SK/out $SK/prog'
@@ -1367,7 +1516,7 @@ echo TESTX.KOR.0000.V039.001.260101 > $T/product
 asreset; mkdir -p $X/wp; (PATH=$X/bin:$T/bin:/usr/bin:/bin:/sbin HOTSPOT_LIB=1 BB=$T/bin/bb W=$X/w BK=$X/bk HMGDATA=$X/hd KP_HMG=$T/app/hmgapi WPDIR=$X/wp sh -c '. '$T'/app/svc/hotspot.sh; export PATH='$X'/bin:'$T'/bin:/usr/bin:/bin:/sbin; setup_hmgapi') > $X/out; rm -rf $X/wp
 check "  wireless.projection이 설치된 차는 자동 시험 안 함" '! grep -q -E "map-car|verify-map|engine install" $X/calls && grep -q "wireless.projection이 설치" $X/out'
 asreset; mkdir -p $X/hd/maps/kia/dl3/kor/260101; echo '{"products": ["TESTX.KOR."]}' > $X/hd/maps/kia/dl3/kor/260101/car.json
-touch $X/mc_nw; as > $X/out; rm -f $X/calls; as > $X/out2; rm -f $X/mc_nw
+touch $X/mc_nw; as > $X/out; rm -f $X/calls; : > $X/calls; as > $X/out2; rm -f $X/mc_nw
 check "  다른 폴더 이름의 이 차 지도(공식판)가 있으면 그 지도를 한 번 확인하고 모드 설치, 다음 부팅엔 지도 만들기·확인 안 함" 'grep -q "이미 있음" $X/out && [ -f $X/bk/automap.checked ] && [ -f $X/hd/maps/kia/dl3/kor/260101/car.json ] && ! grep -q -E "verify-map|map-car" $X/calls'
 asreset; echo TESTX.USA.0000.V039.001.260101 > $T/product; as > $X/out
 check "해외 차는 자동 시험도 하지 않음 (아무것도 안 함)" '[ ! -s $X/calls ]'
@@ -1385,28 +1534,28 @@ chmod +x $X/bin/svc
 aw() { (PATH=$X/bin:$T/bin:/usr/bin:/bin:/sbin HOTSPOT_LIB=1 BOOT_ID=$X/bootid NOTICE=$X/notices BB=$T/bin/bb W=$X/w BK=$X/bk HMGDATA=$X/hd KP_HMG=$T/app/hmgapi SDIO=$X/sdio WAKE_MAX=100 sh -c '. '$T'/app/svc/hotspot.sh; export PATH='$X'/bin:'$T'/bin:/usr/bin:/bin:/sbin; setup_hmgapi'); }
 awreset() { asreset; rm -rf $X/sdio $X/chip_ok $X/chip_drop $X/notices; rm -f $X/hd/public/wifi-chip; mkdir -p $X/sdio; echo 0 > $X/bk/wifi_on; [ -f $X/bootid ] || echo b0 > $X/bootid; }
 asreset; rm -f $X/notices; as > $X/out
-check "Wi-Fi 칩 기록이 있으면 Wi-Fi를 건드리지 않음" '! grep -q "svc wifi" $X/calls && grep -q "engine install" $X/calls && ! grep -q "Wi-Fi를 한 번 켭니다" $X/notices'
+check "Wi-Fi 칩 기록이 있으면 Wi-Fi를 건드리지 않음" '! grep -q "svc wifi" $X/calls && grep -q "engine install" $X/calls && ! grep -q "Wi-Fi를 한 번 켭니다" $X/notices 2>/dev/null'
 awreset; mkdir -p $X/sdio/mmc1:0001:1; aw > $X/out
 check "  칩이 SDIO에 이미 보이면 Wi-Fi를 건드리지 않음" '! grep -q "svc wifi" $X/calls && grep -q "engine install" $X/calls'
 awreset; touch $X/chip_ok; aw > $X/out
 check "칩이 안 보이면 미리 안내하고 Wi-Fi를 한 번 켜고, 칩이 나타나면 모드 설치" 'grep -q "Wi-Fi를 한 번 켭니다" $X/notices && grep -qx "svc wifi enable" $X/calls && grep -q "engine install" $X/calls && grep -q "칩이 나타남" $X/out && [ ! -f $X/bk/wifi.nochip ] && ! grep -q "svc wifi disable" $X/calls'
 check "  깨우기는 모드 설치보다 먼저" '[ "$(grep -n "svc wifi enable" $X/calls | cut -d: -f1)" -lt "$(grep -n "engine install" $X/calls | cut -d: -f1)" ]'
-awreset; touch $X/chip_ok $X/chip_drop; aw > $X/out; rm -f $X/calls $X/notices; aw > $X/out2
+awreset; touch $X/chip_ok $X/chip_drop; aw > $X/out; rm -f $X/calls $X/notices; : > $X/calls; aw > $X/out2
 check "칩이 잠깐 보였다 사라져 설치가 실패해도 다음 부팅에 Wi-Fi를 다시 켜지 않음 (wifi.woke)" '[ -f $X/bk/wifi.woke ] && ! grep -q "svc wifi" $X/calls && ! grep -q "engine install" $X/calls && [ ! -s $X/notices ]'
 # 1.7.3(W-4·G-1): 순정 module_version이 3이 아닌데 칩이 안 보이면 굳히지 않고 부팅마다 한 번씩, 최대 3번 깨운다(부팅은 boot_id로 셈)
 echo b1 > $X/bootid; awreset; aw > $X/out
 check "1.7.3 W-4: 첫 부팅에 Wi-Fi를 켜도 칩이 안 나타나면 모드 설치 안 함, 칩 없음으로 굳히지 않음(wifi.wake 1번째), 다음 부팅에 다시" '! grep -q "engine install" $X/calls && [ ! -f $X/bk/wifi.nochip ] && [ ! -f $X/bk/wifi.nopart ] && [ "$(cat $X/bk/wifi.wake)" = "1 b1" ] && grep -q "다음 부팅에 다시 깨움(1/3" $X/out'
 check "  1.7.1: 그때의 순정 Wi-Fi 기록을 nochip-wifi.txt에 남김(가림: MAC·SSID 없음)" 'grep -q "칩 깨우기 실패 기록" $X/w/nochip-wifi.txt && grep -q "## logcat" $X/w/nochip-wifi.txt && grep -q "SUP_DISCONNEC" $X/w/nochip-wifi.txt'
 check "  설치 전에 Wi-Fi가 꺼져 있었으면 다시 끔" 'grep -qx "svc wifi disable" $X/calls'
-rm -f $X/calls $X/notices; aw > $X/out
+rm -f $X/calls $X/notices; : > $X/calls; aw > $X/out
 check "  같은 부팅에 서비스가 다시 돌면 다시 켜지 않음(알림도 없음)" '! grep -q "svc wifi" $X/calls && [ ! -s $X/notices ] && [ "$(cat $X/bk/wifi.wake)" = "1 b1" ]'
-echo b2 > $X/bootid; rm -f $X/calls; aw > $X/out
+echo b2 > $X/bootid; rm -f $X/calls; : > $X/calls; aw > $X/out
 check "  2번째 부팅: 다시 깨움(2/3), 아직 굳히지 않음" 'grep -qx "svc wifi enable" $X/calls && [ "$(cat $X/bk/wifi.wake)" = "2 b2" ] && [ ! -f $X/bk/wifi.nochip ]'
-echo b3 > $X/bootid; rm -f $X/calls $X/notices; aw > $X/out
+echo b3 > $X/bootid; rm -f $X/calls $X/notices; : > $X/calls; aw > $X/out
 check "  3번째 부팅에도 안 나타나면 칩 실패로 끝냄(wifi.nochip), W-2·W-6 문구(동글 안내)로 알림" 'grep -qx "svc wifi enable" $X/calls && [ -f $X/bk/wifi.nochip ] && grep -q "이 차는 Wi-Fi 칩이 켜지지 않아 지원하기 어렵습니다. USB Wi-Fi 동글로 쓰는 방법을 준비하고 있습니다." $X/notices && ! grep -q "engine install" $X/calls'
-echo b4 > $X/bootid; rm -f $X/calls $X/notices; aw > $X/out
+echo b4 > $X/bootid; rm -f $X/calls $X/notices; : > $X/calls; aw > $X/out
 check "  그 뒤 부팅: Wi-Fi를 다시 켜지 않고, 알림도 없음" '! grep -q "svc wifi" $X/calls && ! grep -q "engine install" $X/calls && [ ! -s $X/notices ]'
-mkdir -p $X/sdio/mmc1:0001:1; rm -f $X/calls; aw > $X/out
+mkdir -p $X/sdio/mmc1:0001:1; rm -f $X/calls; : > $X/calls; aw > $X/out
 check "  그 뒤 칩이 보이게 되면(차주가 켬) 기록과 상관없이 모드 설치" 'grep -q "engine install" $X/calls && ! grep -q "svc wifi" $X/calls'
 # 1.7.3(W-1): 순정 module_version 3이면 깨우지 않고 바로 부품 없음
 printf '#!/bin/sh\necho "11-10 09:00:00.000 D/WifiHW   (  500): wifi_get_module_version: 3"\n' > $X/bin/logcat; chmod +x $X/bin/logcat
@@ -1425,6 +1574,80 @@ E2
 chmod +x $X/bin/svc; awreset; rm -f $X/modver3; aw > $X/out
 check "  깨운 뒤 module_version=3이 나오면 그때 부품 없음(한 번만 깨움)" '[ "$(grep -c "svc wifi enable" $X/calls)" = 1 ] && [ -f $X/bk/wifi.nopart ] && [ ! -f $X/bk/wifi.nochip ]'
 rm -f $X/bin/logcat $X/modver3
+# 1.7.4(P-1, #276 레이·#252 팰리세이드): module_version 3 줄이 깨우기 초반에만 logcat에 있다가 버퍼가 밀려 사라지는 차.
+# 예전에는 대기(최대 60초)가 끝난 뒤에만 읽어 놓치고 다음 부팅에 또 깨웠다. 깨우기 반복 안에서 읽어 첫 깨우기에 부품 없음으로 끝낸다.
+# 가짜 sleep이 네 번째 부르면 그 줄을 지운다(밀림: 리뷰 반영 뒤 3회차마다 읽으므로 반복 안의 3회차 읽기로만 잡을 수 있고 반복 뒤 읽기로는 못 잡음). 가짜 svc wifi enable이 줄을 만든다(뒤에서 돌아 sleep 0.2로 틈을 줌)
+p1reset() { awreset; rm -f $X/mv3live $X/sleepn $X/mvval $X/lcn $X/p1hang; : > $X/calls; }
+printf '#!/bin/sh\necho x >> %s/lcn\n[ -f %s/mv3live ] && echo "11-14 09:00:00.000 D/WifiHW   (  500): wifi_get_module_version: $(cat %s/mvval 2>/dev/null || echo 3)"\nexit 0\n' $X $X $X > $X/bin/logcat; chmod +x $X/bin/logcat
+# (깨우기 반복의 sleep 2만 센다: wifi_restore_off의 sleep 1은 세지 않음)
+printf '#!/bin/sh\n/bin/sleep 0.2\n[ "$1" = 2 ] || exit 0\nn=$(( $(cat %s/sleepn 2>/dev/null || echo 0) + 1 )); echo $n > %s/sleepn\n[ $n -ge 4 ] && rm -f %s/mv3live\nexit 0\n' $X $X $X > $X/bin/sleep; chmod +x $X/bin/sleep
+cat > $X/bin/svc <<E2
+#!/bin/sh
+echo "svc \$*" >> $X/calls
+[ "\$*" = "wifi enable" ] && : > $X/mv3live
+[ "\$*" = "wifi enable" ] && [ -f $X/chip_ok ] && mkdir -p $X/sdio/mmc1:0001:1
+[ "\$*" = "wifi enable" ] && [ -f $X/p1hang ] && exec /bin/sleep 20
+exit 0
+E2
+chmod +x $X/bin/svc
+p1w() { (PATH=$X/bin:$T/bin:/usr/bin:/bin:/sbin HOTSPOT_LIB=1 BOOT_ID=$X/bootid NOTICE=$X/notices BB=$T/bin/bb W=$X/w BK=$X/bk HMGDATA=$X/hd SDIO=$X/sdio WAKE_MAX=8 sh -c '. '$T'/app/svc/hotspot.sh; export PATH='$X'/bin:'$T'/bin:/usr/bin:/bin:/sbin; wake_wifi; echo "rc=$?"'); }
+echo p1a > $X/bootid; p1reset; p1w > $X/out
+check "1.7.4 P-1: module_version 3 줄이 깨우기 초반에만 있다가 사라져도 첫 깨우기에 부품 없음(rc 1, wifi.nopart·wifi.modver 3, 근거 \$BK 사본, 깨우기 1번, 남은 대기 그만둠)" 'grep -qx "rc=1" $X/out && [ -f $X/bk/wifi.nopart ] && [ ! -f $X/bk/wifi.nochip ] && [ "$(cat $X/bk/wifi.modver)" = 3 ] && [ -s $X/bk/nochip-wifi.txt ] && [ "$(grep -c "^svc wifi enable" $X/calls)" = 1 ] && [ "$(cat $X/sleepn)" = 3 ] && grep -q "깨우는 중 순정 module_version=3" $X/out'
+check "  P-1: 부품 없음으로 끝낼 때도 꺼져 있던 Wi-Fi를 다시 끔(예전 갈래와 같음)" 'grep -qx "svc wifi disable" $X/calls'
+echo p1b > $X/bootid; rm -f $X/calls $X/sleepn; : > $X/calls; p1w > $X/out2
+check "  P-1: 다음 부팅에는 깨우지 않음(부품 없음 기록)" 'grep -qx "rc=1" $X/out2 && ! grep -q "svc wifi enable" $X/calls'
+echo p1c > $X/bootid; p1reset; echo 1 > $X/mvval; p1w > $X/out
+check "  P-1: 깨우는 중 값이 3이 아니면(1) 예전과 같음: 대기를 다 하고 다음 부팅에 다시(rc 3, 1/3), 부품 없음 아님" 'grep -qx "rc=3" $X/out && [ ! -f $X/bk/wifi.nopart ] && [ "$(cat $X/bk/wifi.wake)" = "1 p1c" ] && [ "$(cat $X/sleepn)" = 8 ]'
+# 리뷰 반영: logcat 전체 읽기는 3회차마다 + 반복 뒤 한 번(8회차면 module_version 읽기 2+1=3번, 8/3+1 이하). 그 밖에 깨우기 전 확인 1번과
+# 근거 기록(wifi_record)의 2번이 있어 모두 6번 이하(매 회차 읽던 판은 8+1+1+2=12번)
+check "  P-1 리뷰: 대기 8회차·값 1에서 logcat을 부른 횟수가 6번 이하(3회차마다 + 반복 뒤 + 깨우기 전 1·근거 기록 2)" '[ "$(wc -l < $X/lcn | tr -d " ")" -le 6 ]'
+echo p1d > $X/bootid; p1reset; printf '#!/bin/sh\necho x >> %s/lcn\nexit 0\n' $X > $X/bin/logcat; chmod +x $X/bin/logcat; p1w > $X/out
+check "  P-1: module_version 줄이 없으면 예전과 같음(rc 3, 대기를 다 함), logcat 6번 이하" 'grep -qx "rc=3" $X/out && [ ! -f $X/bk/wifi.nopart ] && [ "$(cat $X/sleepn)" = 8 ] && [ "$(wc -l < $X/lcn | tr -d " ")" -le 6 ]'
+printf '#!/bin/sh\n[ -f %s/mv3live ] && echo "11-14 09:00:00.000 D/WifiHW   (  500): wifi_get_module_version: 3"\nexit 0\n' $X > $X/bin/logcat; chmod +x $X/bin/logcat
+echo p1e > $X/bootid; p1reset; touch $X/chip_ok; p1w > $X/out
+check "  P-1: module_version이 3이어도 칩이 나타나면 칩 쪽이 이김(rc 0, wifi.woke, 부품 없음 아님)" 'grep -qx "rc=0" $X/out && [ -f $X/bk/wifi.woke ] && [ ! -f $X/bk/wifi.nopart ]'
+# 리뷰 낮음 3: svc wifi enable이 아직 돌 때 3을 봐서 일찍 끝내면 "끝나지 않아 멈춤"이 아니라 일찍 끝냈다고 남김
+printf '#!/bin/sh\necho x >> %s/lcn\n[ -f %s/mv3live ] && echo "11-14 09:00:00.000 D/WifiHW   (  500): wifi_get_module_version: 3"\nexit 0\n' $X $X > $X/bin/logcat; chmod +x $X/bin/logcat
+rm -rf $X/sdio/mmc1:0001:1; echo p1f > $X/bootid; p1reset; touch $X/p1hang; p1w > $X/out; rm -f $X/p1hang
+check "  P-1 리뷰 낮음 3: 일찍 끝낼 때 svc를 멈춘 줄은 '기다리지 않고 멈춤(순정 module_version=3…)', '끝나지 않아 멈춤' 없음, 결과는 부품 없음" 'grep -q "svc wifi enable을 기다리지 않고 멈춤(순정 module_version=3을 봐서 일찍 끝냄)" $X/out && ! grep -q "끝나지 않아 멈춤" $X/out && grep -qx "rc=1" $X/out && [ -f $X/bk/wifi.nopart ]'
+rm -f $X/bin/logcat $X/bin/sleep $X/mv3live $X/sleepn $X/mvval $X/chip_ok $X/lcn; rm -rf $X/sdio/mmc1:0001:1; echo b5 > $X/bootid
+# 1.7.4(P-2, #276·#252·#78·#228): 첫 깨우기 실패(확인 중) + 지도 확인 통과(_restart=1)에서 "설정을 마쳤습니다…지원 목록에 넣습니다"가
+# 진행 기록·알림에 남던 것. 확인 중(_wchk)을 먼저 보아 WIFI_CHECK_MSG가 나와야 한다(진행 기록: P_ON=1, 알림: P_ON 없음)
+p2w() { (PATH=$X/bin:$T/bin:/usr/bin:/bin:/sbin HOTSPOT_LIB=1 BOOT_ID=$X/bootid NOTICE=$X/notices PROG=$X/prog2 BB=$T/bin/bb W=$X/w BK=$X/bk HMGDATA=$X/hd KP_HMG=$T/app/hmgapi SDIO=$X/sdio WAKE_MAX=3 sh -c '. '$T'/app/svc/hotspot.sh; export PATH='$X'/bin:'$T'/bin:/usr/bin:/bin:/sbin; '"$1"'setup_hmgapi'); }
+echo p2a > $X/bootid; awreset; rm -f $X/prog2; p2w 'P_ON=1; ' > $X/out
+check "1.7.4 P-2: 첫 깨우기 실패 + 지도 확인 통과 → 진행 기록은 'Wi-Fi를 켜는 중입니다…'(reboot), '설정을 마쳤습니다' 없음" 'grep -q "지도 확인 통과" $X/out && grep -qx "state=reboot" $X/prog2 && grep -qx "stage=Wi-Fi를 켜는 중입니다(재부팅 뒤 한 번 더 확인). 내비를 3분 후 재부팅해 주세요." $X/prog2 && ! grep -q "설정을 마쳤습니다" $X/prog2 $X/out'
+echo p2b > $X/bootid; awreset; rm -f $X/prog2; p2w '' > $X/out
+check "  P-2: 진행 기록을 쓰지 않는 경로(알림)도 '설정을 마쳤습니다…지원 목록' 대신 확인 중 문구" 'grep -q "지도 확인 통과" $X/out && ! grep -q "설정을 마쳤습니다" $X/notices && grep -q "Wi-Fi를 켜는 중입니다(재부팅 뒤 한 번 더 확인)" $X/notices'
+echo p2c > $X/bootid; awreset; touch $X/chip_ok; rm -f $X/prog2; p2w 'P_ON=1; ' > $X/out; rm -f $X/chip_ok
+check "  P-2: 칩이 있는 정상 설치는 그대로 '무선 카플레이 설정을 마쳤습니다. 내비를 3분 후 재부팅해 주세요.'" 'grep -qx "stage=무선 카플레이 설정을 마쳤습니다. 내비를 3분 후 재부팅해 주세요." $X/prog2 && grep -q "engine install" $X/calls'
+rm -f $X/prog2; echo b5 > $X/bootid
+# 1.7.4(P-4, #277): "무선 모드를 넣지 못했습니다"로만 보이던 네 길. 각 길이 그 이유 문구로 진행 기록을 끝낸다(고치기 전에는 기본 문구)
+P4MAP="이 차의 지도를 확인하지 못해 무선 모드를 넣지 않았습니다. 삭제 후 다시 설치해도 같으면 USB를 꽂고 [제보 파일 만들기]로 알려 주세요."
+P4NOMAP="HMG-API가 이 차의 지도를 만들지 않아 무선 모드를 넣지 않았습니다. USB를 꽂고 [제보 파일 만들기]로 알려 주세요."
+P4GONE="전에는 켜지던 Wi-Fi가 지금은 켜지지 않습니다. 3분 후 재부팅해도 같으면 USB를 꽂고 [제보 파일 만들기]로 알려 주세요."
+p4st() { sed -n 's/^stage=//p' $X/prog2; }
+echo TESTX.KOR.0000.V039.001.260101 > $T/product
+echo p4a > $X/bootid; awreset; mkdir -p $X/sdio/mmc1:0001:1; : > $X/bk/automap.bad; rm -f $X/prog2; p2w 'P_ON=1; ' > $X/out
+check "1.7.4 P-4 ①: 자동 시험 차에 automap.bad가 남음 → 진행 기록 실패에 지도 기록 문구(넣지 못했습니다 아님), 모드 설치 안 함" 'grep -qx "state=fail" $X/prog2 && [ "$(p4st)" = "$P4MAP" ] && ! grep -q "engine install" $X/calls'
+echo p4b > $X/bootid; awreset; mkdir -p $X/sdio/mmc1:0001:1; touch $X/mc_empty; rm -f $X/prog2; p2w 'P_ON=1; ' > $X/out; rm -f $X/mc_empty
+check "  P-4 ②: 지도를 만들지 않음(map-car가 written·has a map 줄 없이 끝남) → HMG-API가 지도를 만들지 않았다는 문구" 'grep -qx "state=fail" $X/prog2 && [ "$(p4st)" = "$P4NOMAP" ] && grep -q "자동 시험: 지도를 만들지 않음" $X/out && ! grep -q "engine install" $X/calls'
+rm -f $T/product
+echo p4c > $X/bootid; awreset; mkdir -p $X/sdio/mmc1:0001:1; echo "kia/niro/kor/260902 $(md5 -q $T/app/hmgapi/maps/kia/niro/kor/260902/car.json)" > $X/bk/map.bad; rm -f $X/prog2; p2w 'P_ON=1; ' > $X/out
+check "  P-4 ③: 확인된 차(니로)에 map.bad가 남음 → 지도 기록 문구" 'grep -qx "state=fail" $X/prog2 && [ "$(p4st)" = "$P4MAP" ] && ! grep -q "engine install" $X/calls'
+# (그 뒤 부팅을 흉내: 지도는 이미 차에 있어 다시 확인하지 않음. 같은 부팅에 지도 확인이 통과하는 경우는 아래 리뷰 낮음 1 시험)
+echo p4d > $X/bootid; awreset; mkdir -p $X/hd/maps/kia/niro/kor/260902; cp $T/app/hmgapi/maps/kia/niro/kor/260902/*.json $X/hd/maps/kia/niro/kor/260902/; : > $X/bk/wifi.woke; rm -f $X/prog2; p2w 'P_ON=1; ' > $X/out
+check "  P-4 ④: 칩을 본 기록(wifi.woke)은 있는데 지금 칩이 없음(wake_wifi 2) → '전에는 켜지던 Wi-Fi가…' 문구, 깨우지 않음" 'grep -qx "state=fail" $X/prog2 && [ "$(p4st)" = "$P4GONE" ] && ! grep -q "svc wifi" $X/calls && ! grep -q "engine install" $X/calls'
+echo p4e > $X/bootid; awreset; mkdir -p $X/hd/maps/kia/niro/kor/260902; cp $T/app/hmgapi/maps/kia/niro/kor/260902/*.json $X/hd/maps/kia/niro/kor/260902/; : > $X/bk/wifi.woke; : > $X/bk/wifi.nochip; rm -f $X/prog2; p2w 'P_ON=1; ' > $X/out
+check "  P-4: 칩 실패 기록(wifi.nochip)이 함께 있으면 ④ 문구를 쓰지 않음(판정은 nochip이 맡음, 리뷰 낮음 1 뒤 진행 기록은 칩 실패 문구)" '! grep -q "전에는 켜지던" $X/prog2 && grep -q "^stage=이 차는 Wi-Fi 칩이 켜지지 않아" $X/prog2'
+# 리뷰 낮음 1: 같은 부팅에 지도 확인이 통과(_restart=1)했는데 wake_wifi가 2(칩을 다시 깨우지 않음)면 "설정을 마쳤습니다"가 아니라 이유 문구
+echo p4f > $X/bootid; awreset; : > $X/bk/wifi.woke; rm -f $X/prog2; p2w 'P_ON=1; ' > $X/out
+check "  P-4 리뷰 낮음 1: 지도 확인 통과 + 칩이 사라짐(wifi.woke) → 진행 기록 실패에 '전에는 켜지던…', '설정을 마쳤습니다' 없음" 'grep -q "지도 확인 통과" $X/out && grep -qx "state=fail" $X/prog2 && [ "$(p4st)" = "$P4GONE" ] && ! grep -q "설정을 마쳤습니다" $X/prog2 $X/out'
+echo p4g > $X/bootid; awreset; : > $X/bk/wifi.woke; p2w '' > $X/out
+check "  P-4 리뷰 낮음 1: 진행 기록을 쓰지 않는 경로(알림)도 '설정을 마쳤습니다' 대신 그 이유" 'grep -q "지도 확인 통과" $X/out && ! grep -q "설정을 마쳤습니다" $X/notices && grep -q "전에는 켜지던 Wi-Fi가 지금은 켜지지 않습니다" $X/notices'
+echo p4h > $X/bootid; awreset; : > $X/bk/wifi.woke; : > $X/bk/wifi.nochip; rm -f $X/prog2; p2w 'P_ON=1; ' > $X/out
+check "  P-4 리뷰 낮음 1: 지도 확인 통과 + 칩 실패(wifi.nochip, wake_wifi 2)도 '설정을 마쳤습니다' 없이 칩 실패 문구로 실패" 'grep -q "지도 확인 통과" $X/out && grep -qx "state=fail" $X/prog2 && grep -q "^stage=이 차는 Wi-Fi 칩이 켜지지 않아" $X/prog2 && ! grep -q "설정을 마쳤습니다" $X/prog2 $X/out'
+check "  P-4: 네 문구는 한두 문장, 토스트 없음, 비밀정보 없음(소스: hotspot.sh 변수 세 개)" 'grep -F -x -q "MAPFAIL_MSG=\"$P4MAP\"" $PKG/svc/hotspot.sh && grep -F -x -q "WIFIGONE_MSG=\"$P4GONE\"" $PKG/svc/hotspot.sh && grep -q "^NOMAP_MSG=\"" $PKG/svc/hotspot.sh && grep -q "^WIFIGONE_MSG=\"" $PKG/svc/hotspot.sh && ! grep -q "toast" $PKG/svc/hotspot.sh'
+rm -f $X/prog2; echo b5 > $X/bootid
 # 가짜 svc를 원래대로(칩 나타남·멈춤·실패 흉내)
 cat > $X/bin/svc <<E2
 #!/bin/sh
@@ -1461,7 +1684,7 @@ awreset; mkdir -p $X/bk/wifi.wake; aw > $X/out; rmdir $X/bk/wifi.wake
 check "  깨우기 횟수를 기록하지 못하면 깨우지 않음" '! grep -q "svc wifi" $X/calls && grep -q "횟수를 기록하지 못해" $X/out'
 # 재리뷰 중간 2: 칩이 보였다 안 보였다 하는 차(#52·#55 계열)에서도 깨우기는 모두 합쳐 3번까지(칩이 보이는 부팅에 횟수를 지우지 않음)
 ww() { (PATH=$X/bin:$T/bin:/usr/bin:/bin:/sbin HOTSPOT_LIB=1 BOOT_ID=$X/bootid NOTICE=$X/notices BB=$T/bin/bb W=$X/w BK=$X/bk HMGDATA=$X/hd SDIO=$X/sdio WAKE_MAX=3 sh -c '. '$T'/app/svc/hotspot.sh; export PATH='$X'/bin:'$T'/bin:/usr/bin:/bin:/sbin; wake_wifi; echo "rc=$?"'); }
-awreset; rm -f $X/calls
+awreset; rm -f $X/calls; : > $X/calls
 for b in 1 2 3 4 5 6 7 8; do
   echo "alt$b" > $X/bootid
   if [ $((b % 2)) = 1 ]; then mkdir -p $X/sdio/mmc1:0001:1; else rm -rf $X/sdio/mmc1:0001:1; fi
@@ -1480,17 +1703,12 @@ echo r1 > $X/bootid; awreset; : > $X/bk/wifi.nochip; ww > $X/out
 check "1.7.3 재리뷰 L-2: 근거 없던 칩 없음 기록 + 다시 확인에서 module_version=1 → 칩 없음 기록을 지우고 다음 부팅에 다시(rc 3, 1/3)" 'grep -qx "rc=3" $X/out && [ ! -f $X/bk/wifi.nochip ] && [ "$(cat $X/bk/wifi.wake)" = "1 r1" ] && [ -f $X/bk/nochip.rechk ]'
 rm -f $X/bin/logcat; echo b5 > $X/bootid
 check "  재리뷰 L-8: 설치 전 꺼져 있던 Wi-Fi 끄기(svc wifi disable)는 뒤에서 돌리고 회차 상한으로 기다림(소스)" 'awk "/^wifi_restore_off\(\) \{/,/^}/" $PKG/svc/hotspot.sh | grep -q "( svc wifi disable >/dev/null 2>&1; echo \$? > \$W/svcoff.rc ) &" && ! grep -q "wifi_was_off && svc wifi disable" $PKG/svc/hotspot.sh'
-# D-9(소유자 결정 2026-11-10): 1.7.2까지 굳은 wifi.nochip은 근거(module_version)가 3이 아닐 때만 2번 더
+# 1.7.4(L-2a): legacy_nochip_retry를 지웠다(옛 D-9 시험 5개는 tests/legacy/removed-1.7.4.md). 1.7.2가 남긴 wifi.nochip(wifi.wake 없음)은
+# 다시 깨우지 않고 칩 실패 그대로(rc 2). 무선 모드를 넣지 않으므로 유선 카플레이는 그대로다(둘 다 안 되는 상태가 생기지 않음)
+awreset; : > $X/bk/wifi.nochip; : > $X/bk/wifi.woke; echo "판정 근거: 순정 module_version=1 (3이면 …)" > $X/bk/nochip-wifi.txt; ww > $X/out
+check "1.7.4 L-2a: 1.7.2가 남긴 wifi.nochip(wifi.wake 없음, 근거 1)은 다시 깨우지 않고 칩 실패 그대로(rc 2), 기록을 바꾸지 않음" 'grep -qx "rc=2" $X/out && ! grep -q "svc wifi" $X/calls 2>/dev/null && [ -f $X/bk/wifi.nochip ] && [ ! -f $X/bk/wifi.wake ] && [ ! -f $X/bk/wifi.nopart ]'
 awreset; : > $X/bk/wifi.nochip; : > $X/bk/wifi.woke; echo "판정 근거: 순정 module_version=1 (3이면 …)" > $X/bk/nochip-wifi.txt; aw > $X/out
-check "1.7.3 D-9: 1.7.2의 wifi.nochip + 근거 module_version=1 + wifi.wake 없음 → 다시 깨움(2/3), 아직 굳히지 않음" 'grep -qx "svc wifi enable" $X/calls && [ "$(cat $X/bk/wifi.wake)" = "2 b5" ] && [ ! -f $X/bk/wifi.nochip ] && [ ! -f $X/bk/wifi.woke ]'
-echo b6 > $X/bootid; rm -f $X/calls; aw > $X/out
-check "  다음 부팅(3/3)에도 안 보이면 칩 실패로 끝남" 'grep -qx "svc wifi enable" $X/calls && [ -f $X/bk/wifi.nochip ]'
-awreset; : > $X/bk/wifi.nochip; : > $X/bk/wifi.woke; echo "판정 근거: 순정 module_version=3 (3이면 …)" > $X/bk/nochip-wifi.txt; aw > $X/out
-check "  합치기(이슈 조사 ①): 근거 module_version=3이면 깨우지 않고 칩 없음 기록을 부품 없음(wifi.nopart)으로 옮김(W-1 문구)" '! grep -q "svc wifi" $X/calls && [ ! -f $X/bk/wifi.nochip ] && [ -f $X/bk/wifi.nopart ] && grep -q "이 차의 내비에는 Wi-Fi 부품이 없어 무선 카플레이를 쓸 수 없습니다" $X/notices && ! grep -q "칩이 켜지지 않아" $X/notices'
-awreset; : > $X/bk/wifi.nochip; echo "판정 근거: 순정 module_version=3 (3이면 …)" > $X/bk/nochip-wifi.txt; aw > $X/out
-check "  wifi.woke가 없는 옛 기록이어도 깨우지 않고 부품 없음으로" '! grep -q "svc wifi" $X/calls && [ -f $X/bk/wifi.nopart ] && [ ! -f $X/bk/wifi.nochip ]'
-awreset; : > $X/bk/wifi.nochip; : > $X/bk/wifi.woke; echo "판정 근거: 순정 module_version=없음 (3이면 …)" > $X/bk/nochip-wifi.txt; aw > $X/out
-check "  근거에 숫자가 없으면 그대로(깨우지 않음)" '! grep -q "svc wifi" $X/calls && [ -f $X/bk/wifi.nochip ]'
+check "  L-2a: 그 상태에서 서비스 설정은 무선 모드를 설치·적용하지 않고 Wi-Fi도 켜지 않음(유선 카플레이에 손대지 않음)" '! grep -q "engine install\|engine apply\|svc wifi" $X/calls 2>/dev/null'
 echo b1 > $X/bootid
 awreset; touch $X/chip_ok $X/vm_fail; aw > $X/out
 check "지도 확인이 실패하면 Wi-Fi를 켜지 않음 (모드를 넣지 않을 때는 깨우지 않음)" '! grep -q "svc wifi" $X/calls'
@@ -1500,7 +1718,7 @@ check "  모드 설치를 이미 해 봤으면(mod.tried) Wi-Fi를 켜지 않음
 awreset; : > $X/bk/wifi.nochip; : > $X/bk/wifi.woke; aw > $X/out
 check "1.7.2 P-12: wifi.nochip인데 근거 기록이 없으면 한 번 다시 깨워 근거(판정 근거 module_version 줄)를 남김" 'grep -qx "svc wifi enable" $X/calls && [ -f $X/bk/nochip.rechk ] && [ -f $X/bk/wifi.nochip ] && grep -q "^판정 근거: 순정 module_version=" $X/w/nochip-wifi.txt && grep -q "한 번만 다시 확인" $X/out'
 check "  리뷰 M-1: 근거 사본을 업데이트에도 남는 \$BK에도 둠" 'grep -q "^판정 근거: 순정 module_version=" $X/bk/nochip-wifi.txt'
-rm -f $X/calls $X/w/nochip-wifi.txt; aw > $X/out
+rm -f $X/calls $X/w/nochip-wifi.txt; : > $X/calls; aw > $X/out
 check "  두 번째부터는 다시 깨우지 않음(횟수 제한 nochip.rechk)" '! grep -q "svc wifi" $X/calls'
 awreset; : > $X/bk/wifi.nochip; echo "판정 근거: x" > $X/w/nochip-wifi.txt; aw > $X/out
 check "  근거 기록이 이미 있으면 다시 깨우지 않음" '! grep -q "svc wifi" $X/calls && [ ! -f $X/bk/nochip.rechk ]'
@@ -1611,7 +1829,7 @@ _k=0; while [ "$(grep -c "^hostapd " $WF/calls 2>/dev/null)" != 5 ] && [ $_k -lt
 rm -f $WF/bin/hostapd $WF/bin/dnsmasq
 check "  4b K-4: hostapd가 5번 바로 꺼짐 → '시작'·'4초 안에 꺼짐' 각 3줄 + '더 남기지 않음' 각 1줄" '[ "$(grep -c "hostapd 시작$" $WF/out)" = 3 ] && [ "$(grep -c "hostapd가 4초 안에 꺼짐(5GHz 149번" $WF/out)" = 3 ] && [ "$(grep -c "hostapd를 자꾸 다시 켬: 이번 실행에서는 이 기록을 더 남기지 않음" $WF/out)" = 1 ] && [ "$(grep -c "hostapd가 자꾸 4초 안에 꺼짐: 이번 실행에서는 이 기록을 더 남기지 않음" $WF/out)" = 1 ] && grep -qx done $WF/out'
 check "  4b K-4: 기록을 줄여도 다시 시도는 그대로(up 5번 모두 hostapd를 띄움)" '[ "$(grep -c "^hostapd " $WF/calls)" = 5 ]'
-check "  4b K-4: 제한은 log_cap 한 곳(3곳에서 씀)" '[ "$(grep -c "log_cap [A-Z_]* " $PKG/svc/hotspot.sh)" = 3 ] && grep -q "^log_cap() {" $PKG/svc/hotspot.sh'
+check "  4b K-4: 제한은 log_cap 한 곳(4곳에서 씀, 묶음 H 최종의 dnsmasq 예전 방식으로 내림 포함)" '[ "$(grep -c "log_cap [A-Z_]* " $PKG/svc/hotspot.sh)" = 4 ] && grep -q "^log_cap() {" $PKG/svc/hotspot.sh'
 # 4b 리뷰 M-1: 제한은 **이어진 실패**에만. 정상 다시 시작은 늘 남기고, 성공하면(hostapd가 살아 있음·wpa_supplicant 없음) 다시 센다
 printf '#!/bin/sh\necho "hostapd $*" >> %s/calls\n[ -f %s/hok ] && echo "  1 root 0 S hostapd $*" > %s/ps\nexit 0\n' $WF $WF $WF > $WF/bin/hostapd
 printf '#!/bin/sh\necho "dnsmasq $*" >> %s/calls\n' $WF > $WF/bin/dnsmasq; chmod +x $WF/bin/hostapd $WF/bin/dnsmasq
@@ -1633,7 +1851,7 @@ echo boot-1 > $WF/bootid; wf 'prog 30 run "진행"; stop_all; cat '$WF'/prog'
 check "  서비스가 설치 중에 멈추면 '중간에 멈춤' 실패로 남김" 'grep -qx "state=fail" $WF/prog && grep -q "중간에 멈췄습니다" $WF/prog'
 wfreset; wfsys; echo bad > $WC.owner; wf 'wifi_lock; wifi_lock; wifi_lock; true'
 check "  잠금 실패 로그는 부팅마다 한 번만" '[ "$(grep -c "Wi-Fi 잠금 실패" $WF/out)" = 1 ]'
-check "차에 없는 printf를 busybox 없이 부르지 않음(awk 안의 printf \"%…와 주석 제외)" '[ -z "$(grep -n "printf " $PKG/svc/hotspot.sh $PKG/bin/status.sh $PKG/bin/carreport.sh $PKG/scripts/post.sh $PKG/scripts/preun.sh $B/scripts/kp-wifi-diag.sh $B/scripts/kp-sys-restore.sh | grep -v "BB printf" | grep -v "printf \"%" | grep -v -E "^[^:]+:[0-9]+:[[:space:]]*#")" ]'
+check "차에 없는 printf를 busybox 없이 부르지 않음(awk 안의 printf \"%…와 주석 제외, 1.7.4 L-6: 은퇴 도구 두 개는 tests/legacy로, 디버그 로그 USB 때 USB 도구 usb-*/NEMESIS.sh도)" '[ -z "$(grep -n "printf " $PKG/svc/hotspot.sh $PKG/bin/status.sh $PKG/bin/carreport.sh $PKG/scripts/post.sh $PKG/scripts/preun.sh $B/usb-*/NEMESIS.sh | grep -v "BB printf" | grep -v "printf \"%" | grep -v -E "^[^:]+:[0-9]+:[[:space:]]*#")" ]'
 check "서비스: 1.5.4의 'Wi-Fi 끄기' 방식은 없음(드라이버를 내려 #17에서 실패)" '! grep -q -e "svc wifi disable; _i" -e "give_up_ap" -e "WIFI_FW" $T/app/svc/hotspot.sh'
 check "서비스: 트랩 뒤 대기는 sleep을 뒤에서 돌리고 wait (TERM에 바로 반응)" '! sed -n "/trap .stop_all/,\$p" $T/app/svc/hotspot.sh | grep -q "do sleep 3600; done"'
 
@@ -1642,7 +1860,7 @@ PU=$T/pu; mkdir -p $PU/bk
 sed -e "s#^BB=.*#BB=$T/bin/bb#" -e "s#^BK=.*#BK=$PU/bk#" -e "s#/data/nemesis/apps/korea.projection/svc/hotspot.sh#$T/app/svc/hotspot.sh; export PATH=$X/bin:$T/bin:/usr/bin:/bin:/sbin#" \
   -e "s#^export PATH=.*#export PATH=$X/bin:$T/bin:/usr/bin:/bin:/sbin#" -e "s#^STAGE=.*#STAGE=$PU/stage#" \
   -e "s#/data/local/tmp/korea-projection-status#$PU/status#g" $T/app/scripts/preun.sh > $PU/preun.sh
-pureset() { rm -rf $PU/bk $X/calls $T/notice $X/hd; mkdir -p $PU/bk $X/hd/mods/wireless-carplay-aa; echo '{"system": [{"region": "KOR"}]}' > $X/hd/mods/wireless-carplay-aa/mod.json; }
+pureset() { rm -rf $PU/bk $X/calls $T/notice $X/hd; : > $X/calls; mkdir -p $PU/bk $X/hd/mods/wireless-carplay-aa; echo '{"system": [{"region": "KOR"}]}' > $X/hd/mods/wireless-carplay-aa/mod.json; }
 pu() { (HMGDATA=$X/hd W=$PU/w sh $PU/preun.sh) > $PU/out 2>&1; }
 pureset; : > $PU/bk/mod.ours; printf '%s\n' "restore  /system/onebin/depehev_kr/featurexml.cfg (stock)" "setting  prop/persist.sys.iap2.wifi back to stock" > $X/plan; pu
 check "삭제: 우리가 설치한 모드는 remove → 계획이 되돌리기뿐 → 적용, 삭제 출력에 알림(1.7.1: 알림 없음, 알림 기록도 지움)" 'grep -qx "hmgapid engine remove wireless-carplay-aa" $X/calls && grep -qx "hmgapid engine apply" $X/calls && grep -q "무선 모드도 지웠습니다" $PU/out && [ ! -f $T/notice ]'
@@ -1654,6 +1872,14 @@ pureset; : > $PU/bk/mod.ours; printf '%s\n' "restore  /system/x (stock)" "change
 check "  계획에 다른 변경이 있으면 지우기만 하고 적용은 앱에서 하라고 안내" 'grep -q "engine remove" $X/calls && ! grep -qx "hmgapid engine apply" $X/calls && grep -q "HMG-API 앱에서 변경 사항을 적용" $PU/out'
 pureset; : > $PU/bk/mod.ours; mkdir -p $PU/stage; echo "id=korea.projection" > $PU/stage/NEMESIS.data; pu; rm -rf $PU/stage
 check "  업데이트 중(staging에 새 버전)에는 모드를 지우지 않음" '! grep -q "engine remove" $X/calls'
+# 1.7.4 B-9(#74): 업데이트·같은 판 다시 설치(staging에 새 판)는 automap.bad를 남기고, 삭제(Uninstall)는 지운다
+pureset; : > $PU/bk/automap.bad; mkdir -p $PU/stage; echo "id=korea.projection" > $PU/stage/NEMESIS.data; pu; rm -rf $PU/stage
+check "1.7.4 B-9: 업데이트·같은 판 다시 설치로는 automap.bad가 남음" '[ -f $PU/bk/automap.bad ] && grep -q "업데이트: 이전 버전 정리" $PU/out'
+pureset; : > $PU/bk/automap.bad; pu
+check "  B-9: 삭제(Uninstall)하면 automap.bad도 지워짐(지운 뒤 다시 설치하면 다시 시도)" '[ ! -f $PU/bk/automap.bad ]'
+# 1.7.4(L-2a·L-2b): 1.7.2가 남긴 상태(wifi.wake 없는 wifi.nochip, perms.ours 없음)를 가진 차의 삭제도 깨끗이 끝남
+pureset; : > $PU/bk/wifi.nochip; : > $PU/bk/wifi.woke; echo "판정 근거: 순정 module_version=1" > $PU/bk/nochip-wifi.txt; pu
+check "1.7.4 L-2: 1.7.2 상태(wifi.wake 없는 wifi.nochip, perms.ours 없음)를 가진 차도 삭제가 끝나고 기록 폴더가 지워짐" 'grep -q "삭제 완료" $PU/out && [ ! -d $PU/bk ]'
 pureset; echo "1000:1010 660" > $PU/bk/wpaconf.orig; mkdir -p $PU/wifi; echo x > $PU/wifi/c.conf; echo 0:0 > $PU/wifi/c.conf.owner; rm -f $T/calls
 cp $WF/bin/chown $X/bin/chown; (HMGDATA=$X/hd W=$PU/w WCONF=$PU/wifi/c.conf sh $PU/preun.sh) > $PU/out 2>&1; rm -f $X/bin/chown
 check "삭제: Wi-Fi 잠금을 원래 소유자로 되돌림" '[ "$(cat $PU/wifi/c.conf.owner)" = 1000:1010 ] && grep -q "Wi-Fi 잠금 되돌림" $PU/out'
@@ -1679,7 +1905,7 @@ pureset; echo null > $PU/bk/wifi_on; echo 0 > $X/wifiset; rm -f $T/calls; pu
 check "  설치 전에 꺼져 있었으면 1로 바꾸지 않음" '! grep -q "settings put" $T/calls 2>/dev/null'
 rm -f $X/bin/settings $X/wifiset
 pureset; : > $PU/bk/mod.ours; touch $X/down; pu; rm -f $X/down
-check "  HMG-API 데몬이 응답하지 않으면 지우지 못하니 앱에서 지우라고 안내" '! grep -q "engine remove" $X/calls && grep -q "HMG-API 앱에서 무선 모드" $PU/out'
+check "  HMG-API 데몬이 응답하지 않으면 지우지 못하니 앱에서 지우라고 안내" '! grep -q "engine remove" $X/calls && grep -q "HMG-API 앱에서 이름에 \"Wireless CarPlay + Android Auto\"가 든 무선 모드를 지우고 적용해 주세요." $PU/out'
 rm -f $T/notice
 
 # --- 1.7.2(P-14): 삭제할 때 우리가 쓴 무선 권한 파일과 featurexml 무선 줄(17·18) 되돌리기(perms_revert) ---
@@ -1925,7 +2151,37 @@ printf '%s\n' "01-01 18:30:04.740 I/HMG-API (  148): hook map: mapped for Kia Ni
 HMGLOG=$T/hl STATUS=$STF BB=$T/bin/bb APP=$T/app SRC=$T/softap.conf W=$T/w sh $T/st.sh >/dev/null
 R=$T/usb0/KoreaProjection-report/1-report.md
 G3=$T/usb0/KoreaProjection-report/3-log.txt
-check "상태 화면용 파일: 644, 키 43개(1.6.1 mod_foreign, 1.6.2 stock_ssid·ap_mode·stock_seen, 1.7.0 state·aa·nowlan, 1.7.1 modver·mod_pending, 1.7.2 mod_hooks, 1.7.3 verdict·verdict_lv·verdict_msg·verdict_end·first·s1·s2·s3 추가)" '[ "$(stat -f %Lp $STF)" = 644 ] && [ "$(grep -c "=" $STF)" = 43 ] && grep -q "^modver=" $STF && grep -qx "mod_pending=no" $STF && grep -qx "nowlan=no" $STF && grep -qx "mod_foreign=no" $STF && grep -q "^state=" $STF && grep -qx "aa=yes" $STF'
+# --- 1.7.4 Q-1: Wi-Fi 장치 이름을 WIF 한 곳으로. 고치기 전(코드의 $WIF를 wlan0으로 되돌리고 WIF 줄을 뺀 사본)과 고친 뒤가
+# 같은 스텁 입력에서 hostapd 설정·up이 부르는 명령·ap.log 문구·Launch 상태 파일·리포트(시각 줄 제외)까지 바이트로 같아야 한다 ---
+Q1=$T/q1; mkdir -p $Q1/bin $Q1/oldapp $Q1/wn $Q1/wo
+cp -R $T/app/. $Q1/oldapp/
+q1old() { sed -e '/^WIF=\${WIF:-wlan0}$/d' -e 's/\$WIF/wlan0/g' "$1"; }
+q1old $T/app/svc/hotspot.sh > $Q1/oldapp/svc/hotspot.sh
+q1old $T/stl.sh | sed "s#APP=\${APP:-[^}]*}#APP=$Q1/oldapp#" > $Q1/stl-old.sh
+check "1.7.4 Q-1(기준: 지금 코드의 \$WIF를 wlan0으로 되돌린 사본, 1.7.3 전수 대조는 리뷰에서 따로 함): 되돌린 사본에는 \$WIF가 없고, 고친 판에는 WIF 줄이 hotspot.sh·status.sh에 하나씩" '! grep -q "\$WIF" $Q1/oldapp/svc/hotspot.sh $Q1/stl-old.sh && [ "$(grep -c "^WIF=\${WIF:-wlan0}$" $PKG/svc/hotspot.sh)" = 1 ] && [ "$(grep -c "^WIF=\${WIF:-wlan0}$" $PKG/bin/status.sh)" = 1 ]'
+# 명령을 적어 두는 가짜(ifconfig는 조회 하나만 답함, hostapd·dnsmasq는 바로 끝남, ps는 빈 목록). up이 뒤에서 띄운 둘은 wait로 기다린다
+printf '#!/bin/sh\necho "ifconfig $*" >> $Q1C\n[ "$#" = 1 ] && printf "%%s Link encap:Ethernet\\n  inet addr:192.168.43.1  Bcast:192.168.43.255  Mask:255.255.255.0\\n" "$1"\nexit 0\n' > $Q1/bin/ifconfig
+printf '#!/bin/sh\necho "hostapd $*" >> $Q1C\n' > $Q1/bin/hostapd; printf '#!/bin/sh\necho "dnsmasq $*" >> $Q1C\n' > $Q1/bin/dnsmasq
+printf '#!/bin/sh\n:\n' > $Q1/bin/ps; chmod +x $Q1/bin/*
+q1lib() { (Q1C=$2/calls; export Q1C; HOTSPOT_LIB=1 BB=$T/bin/bb W=$2 BK=$2/bk CONF=$2/conf WLAN=$2/nowlan NOWLAN_LOG=$2/nowlan.txt BOOT_ID=$T/bootid sh -c '. '$1'; export PATH='$Q1'/bin:'$T'/bin:/usr/bin:/bin:/sbin; PS="$BB ps"; S2=CPssid1; S4=pass12345678; write_conf; up; wlan_has_ip && echo addr-ok; cp_ifs; wait' 2>/dev/null); }
+q1lib $Q1/oldapp/svc/hotspot.sh $Q1/wo > $Q1/o.out; q1lib $T/app/svc/hotspot.sh $Q1/wn > $Q1/n.out
+q1t() { sed -e 's/^[0-9][0-9]-[0-9][0-9] [0-9:]* //' -e 's/^부팅 직후([^)]*) //' "$1"; }
+# 명령 기록: 작업 폴더 경로(wo·wn)는 W로 바꾸고, hostapd는 뒤에서 떠 순서가 흔들리므로 정렬해 비교한다
+q1c() { sed "s#$Q1/w[on]/#W/#g" "$1" | sort; }
+check "  Q-1: hostapd 설정·up이 부른 명령(ifconfig·hostapd·dnsmasq 인자)·ap.log 문구·주소 확인·셀 인터페이스가 \$WIF를 wlan0으로 되돌린 사본과 바이트까지 같음" 'cmp -s $Q1/wo/conf $Q1/wn/conf && [ "$(q1c $Q1/wo/calls)" = "$(q1c $Q1/wn/calls)" ] && [ "$(q1t $Q1/o.out)" = "$(q1t $Q1/n.out)" ] && grep -qx "interface=wlan0" $Q1/wn/conf && grep -q "^dnsmasq .*--interface=wlan0 " $Q1/wn/calls && grep -qx "ifconfig wlan0 192.168.43.1 netmask 255.255.255.0 up" $Q1/wn/calls'
+mkdir -p $Q1/wx; (WIF=xx0; export WIF; q1lib $T/app/svc/hotspot.sh $Q1/wx) > $Q1/x.out
+check "  Q-1: WIF=xx0이면 설정 interface=와 ifconfig·dnsmasq 인자가 xx0(문구 속 wlan0 글자는 그대로)" 'grep -qx "interface=xx0" $Q1/wx/conf && grep -qx "ifconfig xx0 192.168.43.1 netmask 255.255.255.0 up" $Q1/wx/calls && grep -q "^dnsmasq .*--interface=xx0 " $Q1/wx/calls && ! grep -q "wlan0" $Q1/wx/calls && grep -q "^xx0" $Q1/x.out'
+# Launch(상태 파일)와 제보 리포트: 같은 입력으로 고치기 전·뒤를 차례로 만들어 비교(시각이 든 줄은 뺌)
+q1rep() { rm -rf $T/usb0/KoreaProjection-report; _n=$(($(cat $T/reqn 2>/dev/null || echo 0) + 1)); echo $_n > $T/reqn
+  (HMGLOG=$T/hl STATUS=$1 BB=$T/bin/bb APP=$3 SRC=$T/softap.conf W=$T/w BOOT_ID=$T/bootid REQ=$T/report.req sh $2 >/dev/null 2>&1
+   echo "$_n $(cat $T/bootid) 0" > $T/report.req
+   HMGLOG=$T/hl STATUS=$1 BB=$T/bin/bb APP=$3 SRC=$T/softap.conf W=$T/w BOOT_ID=$T/bootid REQ=$T/report.req sh $2 --report >/dev/null 2>&1)
+  grep -v -E "[0-9][0-9]:[0-9][0-9]|부팅 뒤|업타임|uptime|^t=|^ut=|^boot=" $T/usb0/KoreaProjection-report/1-report.md > $4; }
+q1rep $Q1/st-old.txt $Q1/stl-old.sh $Q1/oldapp $Q1/rep-old.md; q1rep $Q1/st-new.txt $T/stl.sh $T/app $Q1/rep-new.md
+q1s() { grep -v -E "^(t|ut|up|boot|time|now|watch_until)=|[0-9][0-9]:[0-9][0-9]" "$1"; }
+check "  Q-1: Launch 상태 파일·제보 리포트(1-report.md, 시각 줄 제외)가 \$WIF를 wlan0으로 되돌린 사본과 바이트까지 같음" '[ -s $Q1/st-new.txt ] && [ -s $Q1/rep-new.md ] && [ "$(q1s $Q1/st-old.txt)" = "$(q1s $Q1/st-new.txt)" ] && cmp -s $Q1/rep-old.md $Q1/rep-new.md'
+rm -rf $Q1
+check "상태 화면용 파일: 644, 키 43개(1.6.1 mod_foreign, 1.6.2 stock_ssid·ap_mode·stock_seen, 1.7.0 state·nowlan, 1.7.1 modver·mod_pending, 1.7.2 mod_hooks, 1.7.3 verdict·verdict_lv·verdict_msg·verdict_end·first·s1·s2·s3, 1.7.4 mod_pin 추가·L-9 aa 뺌)" '[ "$(stat -f %Lp $STF)" = 644 ] && [ "$(grep -c "=" $STF)" = 43 ] && grep -qx "mod_pin=" $STF && grep -q "^modver=" $STF && grep -qx "mod_pending=no" $STF && grep -qx "nowlan=no" $STF && grep -qx "mod_foreign=no" $STF && grep -q "^state=" $STF && ! grep -q "^aa=" $STF'
 check "  1.7.2: 무선 모드 훅 상태는 마지막 기록으로(앞 부팅에 거부, 이번 부팅에 켜짐 → 켜짐)" 'grep -qx "mod_hooks=on" $STF && grep -q "무선 모드 훅(마지막 부팅 기록): 켜짐" $R'
 mkdir -p $T/hlx; printf '%s\n' "01-01 18:30:04.800 I/HMG-API (  144): mods: loaded wireless-carplay-aa 2.2.0" "01-01 18:31:04.731 I/HMG-API (  148): mods: wireless-carplay-aa not loaded: hook point btsettings.projection_helper.open_wireless_page isn't mapped on this car (0 methods match): its hooks are off here, its other parts still apply" > $T/hlx/log.log
 HMGLOG=$T/hlx STATUS=$STF BB=$T/bin/bb APP=$T/app SRC=$T/softap.conf W=$T/w sh $T/st.sh >/dev/null 2>&1
@@ -1936,7 +2192,7 @@ check "  리뷰 L-7: 이유 없는 예외 줄이면 줄 전체 대신 '(예외�
 rm -rf $T/hly
 rm -rf $T/hlx; HMGLOG=$T/hl STATUS=$STF BB=$T/bin/bb APP=$T/app SRC=$T/softap.conf W=$T/w sh $T/st.sh >/dev/null 2>&1
 check "  1.6.2: 우리 hostapd만 돌면 ap_mode=ours, stock_ssid=none" 'grep -qx "ap_mode=ours" $STF && grep -qx "stock_ssid=none" $STF && grep -q "ap_mode=ours (순정 hostapd 판정: none" $R'
-# 1.7.0: 재부팅 전 리포트 표시, QR용 state, 무선 안드로이드 오토(시험) 켜기·끄기(Launch 때 USB 파일)
+# 1.7.0: 재부팅 전 리포트 표시, QR용 state. 1.7.4(L-9): 무선 안드로이드 오토 끄기·켜기(Launch 때 USB 파일)는 없앰
 echo boot17 > $T/boot17; printf 'pct=100\nstate=reboot\nstage=x\nboot=boot17\n' > $T/prog17
 BOOT_ID=$T/boot17 PROG=$T/prog17 HMGLOG=$T/hl STATUS=$STF BB=$T/bin/bb APP=$T/app SRC=$T/softap.conf W=$T/w sh $T/st.sh >/dev/null 2>&1
 check "1.7.0 Launch: state=reboot이면 리포트 맨 위에 굵게 '아직 재부팅하지 않았습니다', 상태 파일 state=reboot" '[ "$(sed -n 3p $R)" = "**아직 재부팅하지 않았습니다. 내비를 재부팅한 뒤 리포트를 다시 만들어 주세요.**" ] && grep -qx "state=reboot" $STF'
@@ -1946,18 +2202,12 @@ check "  지난 부팅에 쓴 state=reboot이면 그 줄 없음(리뷰 L5)" '! g
 printf 'pct=100\nstate=done\nstage=x\n' > $T/prog17
 PROG=$T/prog17 HMGLOG=$T/hl STATUS=$STF BB=$T/bin/bb APP=$T/app SRC=$T/softap.conf W=$T/w sh $T/st.sh >/dev/null 2>&1
 check "  state=done이면 그 줄 없음" '! grep -q "아직 재부팅하지" $R && grep -qx "state=done" $STF'
+# 1.7.4(L-9): Launch는 USB의 kp-aa-off·kp-aa-on을 읽지 않는다(끄기 표시를 만들지도 지우지도 않고, 신호를 내리지 않음)
 export AAOFF=$T/aaoff; rm -f $AAOFF; : > $T/usb0/kp-aa-off; rm -f $T/notice
 HMGLOG=$T/hl STATUS=$STF BB=$T/bin/bb APP=$T/app SRC=$T/softap.conf W=$T/w sh $T/st.sh >/dev/null 2>&1
-check "  USB kp-aa-off → 끄기 표시, aa=no, 리포트에 꺼짐, 알림 없음" '[ -f $AAOFF ] && grep -qx "aa=no" $STF && grep -q "무선 안드로이드 오토: 꺼짐" $R && ! grep -q "안드로이드 오토" $T/notice 2>/dev/null'
-: > $T/usb0/kp-aa-on
-HMGLOG=$T/hl STATUS=$STF BB=$T/bin/bb APP=$T/app SRC=$T/softap.conf W=$T/w sh $T/st.sh >/dev/null 2>&1
-check "  kp-aa-off·kp-aa-on이 함께 있으면 끄기가 먼저(꺼진 채)" '[ -f $AAOFF ] && grep -qx "aa=no" $STF'
-rm -f $T/usb0/kp-aa-off; HMGLOG=$T/hl STATUS=$STF BB=$T/bin/bb APP=$T/app SRC=$T/softap.conf W=$T/w sh $T/st.sh >/dev/null 2>&1
-check "  kp-aa-on만 있으면 다시 켬(끄기 표시 지움), 리포트에 켜짐(기본)" '[ ! -f $AAOFF ] && grep -qx "aa=yes" $STF && grep -q "무선 안드로이드 오토: 켜짐(기본)" $R'
-# K-2: 예전 검사("껐습니다" 문구, 코드에 없어 늘 통과)를 실제 알림 파일 검사로 바꿈. 끈 뒤 한 번 더 Launch해도 알림이 없다
-: > $T/usb0/kp-aa-off; HMGLOG=$T/hl STATUS=$STF BB=$T/bin/bb APP=$T/app SRC=$T/softap.conf W=$T/w sh $T/st.sh >/dev/null 2>&1
-rm -f $T/notice; HMGLOG=$T/hl STATUS=$STF BB=$T/bin/bb APP=$T/app SRC=$T/softap.conf W=$T/w sh $T/st.sh >/dev/null 2>&1
-check "  이미 꺼져 있을 때 다시 Launch해도 AA 끄기·켜기 알림을 쓰지 않음(알림 기록 파일, 리뷰 L6)" '[ -f $AAOFF ] && grep -qx "aa=no" $STF && ! grep -q -E "안드로이드 오토|Android Auto" $T/notice 2>/dev/null'
+check "1.7.4 L-9: Launch는 USB kp-aa-off를 무시(끄기 표시 안 만듦), 상태 파일에 aa 키 없음, 리포트에 '끄기 파일'·kp-aa·꺼짐 문구 없음, 알림 없음" '[ ! -f $AAOFF ] && ! grep -q "^aa=" $STF && ! grep -q -e "kp-aa" -e "끄기 파일" -e "무선 안드로이드 오토: 꺼짐" -e "켜짐(기본)" $R && grep -q "^- 무선 안드로이드 오토: 모드에 알린 신호" $R && ! grep -q "안드로이드 오토" $T/notice 2>/dev/null'
+: > $AAOFF; : > $T/usb0/kp-aa-on; HMGLOG=$T/hl STATUS=$STF BB=$T/bin/bb APP=$T/app SRC=$T/softap.conf W=$T/w sh $T/st.sh >/dev/null 2>&1
+check "  L-9: 남은 끄기 표시가 있어도 Launch는 kp-aa-on으로 지우지 않고(지우는 곳은 서비스 시작 한 곳) 판정에도 쓰지 않음" '[ -f $AAOFF ] && ! grep -q "^aa=" $STF && ! grep -qx "verdict_msg=무선 카플레이 준비됨." $STF'
 rm -f $T/usb0/kp-aa-on $T/usb0/kp-aa-off $T/notice $AAOFF; unset AAOFF
 # 1.7.0(소유자 결정): Launch는 카플레이·계기판 길안내·음악 logcat과 디버그 로그(cp.log)까지 가려서 모은다
 cp $T/bin/logcat $T/logcat.keep
@@ -1999,7 +2249,7 @@ cp $T/ps $T/ps.st; stockps > $T/ps; rm -f $T/notice; : > $SK/bk/stockap.seen
 HMGLOG=$T/hl STATUS=$STF BB=$T/bin/bb APP=$T/app SRC=$T/softap.conf W=$T/w PROC=$SK/proc BK=$SK/bk sh $T/st.sh > $T/st-stock.out
 check "1.6.2 상태: 순정 카플레이 AP → our_ap=no, our_dhcp=no(순정 dnsmasq 오판 없음), other_ap=yes, stock_ssid=carplay, ap_mode=stock" 'grep -qx "our_ap=no" $STF && grep -qx "our_dhcp=no" $STF && grep -qx "other_ap=yes" $STF && grep -qx "stock_ssid=carplay" $STF && grep -qx "ap_mode=stock" $STF && grep -qx "stock_seen=yes" $STF'
 check "  리포트에 ap_mode 한 줄(값 없이 판정만), 순정 AP 기록, 우리 DHCP 아니요" 'grep -q "^- 무선 카플레이 AP: ap_mode=stock (순정 hostapd 판정: carplay, 순정 카플레이 AP 기록: 예)" $R && grep -q "우리 DHCP: 아니요" $R && ! grep -q -F -e "SSID\\cX" -e "word77x" $R $STF'
-check "  요약 문구는 '무선 카플레이 준비됨(내비 Wi-Fi 사용)', 알림은 없음(1.7.0)" 'grep -q "무선 카플레이 준비됨(내비 Wi-Fi 사용)" $T/st-stock.out && [ ! -f $T/notice ]'
+check "  요약 문구는 '무선 카플레이·안드로이드 오토 준비됨'(1.7.4 소유자 문구, AA 안 끈 차), 알림은 없음(1.7.0)" 'grep -q "Korea Projection: 무선 카플레이·안드로이드 오토 준비됨, 카플레이 연결" $T/st-stock.out && [ ! -f $T/notice ]'
 sconf HotspotName1; HMGLOG=$T/hl STATUS=$STF BB=$T/bin/bb APP=$T/app SRC=$T/softap.conf W=$T/w PROC=$SK/proc sh $T/st.sh >/dev/null; sconf 'SSID\cX'
 check "  순정 일반 핫스팟이면 ap_mode=none, stock_ssid=hotspot" 'grep -qx "ap_mode=none" $STF && grep -qx "stock_ssid=hotspot" $STF'
 mv $T/ps.st $T/ps; rm -f $T/notice
@@ -2084,10 +2334,155 @@ check "  softap.conf 인증 종류 숫자, mod.ours·mod.pin 유무, AA 설정�
 check "  계기판 곡 제목 확인 줄은 개수만(제목 없음)" 'grep -q "getOpState DIPO 1, updateClusterInfo DIPO 2, updateClusterWithArtistInfo 0, updateFilename 1, PIO/OPIO TP 안 보냄 0, Cluster New Protocol 1, invalid TP Mode 0" $R && ! grep -q MySecretSong $R'
 check "  AA 신호 이유를 보임" 'grep -q "모드에 알린 신호 .*(이유: wlan0에 우리 AP 주소 없음)" $R'
 check "1.7.2 P-12: Wi-Fi 칩 없음 기록과 순정 판정 근거(module_version) 한 줄" 'grep -q "Wi-Fi 칩 없음 기록(wifi.nochip): 예, 다시 확인함(nochip.rechk): 아니요, 판정 근거: 순정 module_version=3" $R'
+check "1.7.4 Q-3: 칩 실패 기록(wifi.nochip)이 있으면 리포트에 '참고(1.8.0 조사용): 내장 Wi-Fi를 쓸 수 없는 차로 판정됨(칩)'(약속 문구 없음)" 'grep -qx -- "- 참고(1.8.0 조사용): 내장 Wi-Fi를 쓸 수 없는 차로 판정됨(Wi-Fi 칩이 켜지지 않음)" $R && ! grep -q "동글 대상" $R'
 check "  연결 진단 칸에 SSID·비밀번호 없음" '! sed -n "/^## 연결 진단/,/^## /p" $R | grep -q -e "SSID.cX" -e "PASS" -e HotspotName'
 rm -f $T/w8/svc.start; BOOT_ID=$T/boot8 BK=$T/bk8 HMGLOG=$T/hl8 STATUS=$STF BB=$T/bin/bb APP=$T/app SRC=$T/softap.conf W=$T/w8 sh $T/st.sh >/dev/null 2>&1
 check "  서비스 시작 기록이 없으면 '이번 부팅 기록 없음'" 'grep -q "우리 서비스 시작: 이번 부팅 기록 없음" $R'
+: > $T/bk8/wifi.nopart; BOOT_ID=$T/boot8 BK=$T/bk8 HMGLOG=$T/hl8 STATUS=$STF BB=$T/bin/bb APP=$T/app SRC=$T/softap.conf W=$T/w8 sh $T/st.sh >/dev/null 2>&1
+check "  Q-3: 부품 없음 기록(wifi.nopart)이 있으면 '(Wi-Fi 부품 없음)'(칩 실패보다 먼저)" 'grep -qx -- "- 참고(1.8.0 조사용): 내장 Wi-Fi를 쓸 수 없는 차로 판정됨(Wi-Fi 부품 없음)" $R'
 mv $T/logcat.p8 $T/bin/logcat; rm -f $T/boot8; rm -rf "${T:?}"/hl8 "${T:?}"/bk8 "${T:?}"/w8
+HMGLOG=$T/hlm STATUS=$STF BB=$T/bin/bb APP=$T/app SRC=$T/softap.conf W=$T/w sh $T/st.sh >/dev/null
+check "  Q-3: 기록이 없는 차는 그 줄을 쓰지 않음, 상태 화면 판정 문구는 그대로(동글 문구 없음)" '! grep -q "참고(1.8.0 조사용)" $R && ! grep -q "동글" $STF'
+# --- 1.7.4 Q-2: 리포트 "동글 준비 정보" 칸(읽기만). 가짜 /proc·/sys에 일련번호·MAC·폰 이름·커널 명령줄 고유값을 심고 한 글자도 안 나오는지 ---
+Q2=$T/q2; mkdir -p $Q2/proc/sys/kernel $Q2/sys/module/bcmdhd $Q2/sys/module/module/parameters $Q2/sys/class/ieee80211 $Q2/sys/fs/selinux \
+  $Q2/sys/bus/usb/devices/usb1 $Q2/sys/bus/usb/devices/1-1 $Q2/sys/class/net/wlan0/wireless $Q2/sys/class/net/rtwlan0 $Q2/sys/class/net/eth0 \
+  "$Q2/sys/bus/sdio/devices/mmc1:0001:1" "$Q2/sys/bus/mmc/devices/mmc0:0001" $Q2/mods $Q2/apps/usbwifi.hotspot $Q2/empty
+echo "Linux version 3.18.24-tcc (secretbuilder@HOSTX) (gcc version 4.7 (GCC) ) #1 SMP PREEMPT Mon Jan 5 10:00:00 KST 2026" > $Q2/proc/version
+printf '%s\n' "bcmdhd 600000 0 - Live 0x00000000" "cfg80211 200000 1 bcmdhd, Live 0x00000000" > $Q2/proc/modules
+# 묶음 I: 이름 25개 더(모두 27개, 80자에서 잘리지 않고 10개씩 세 줄), bcmdhd는 올린 모듈(initstate), cfg80211은 커널 내장(폴더만)
+q2i=0; while [ $q2i -lt 25 ]; do q2i=$((q2i+1)); echo "vpu_d6_lib_v3_18_$q2i 1000 0 - Live 0x0" >> $Q2/proc/modules; done
+mkdir -p $Q2/sys/module/cfg80211/parameters; echo live > $Q2/sys/module/bcmdhd/initstate; echo KR > $Q2/sys/module/cfg80211/parameters/ieee80211_regdom
+# 묶음 I: USB 장치의 인터페이스(class ff, 드라이버 링크)·인터페이스 수·전류, 허브 포트 수, 가상 CD 모드 동글(0bda:1a2b, 저장 장치)
+mkdir -p $Q2/drv/rtl88x2bu $Q2/drv/usb-storage "$Q2/sys/bus/usb/devices/1-1/1-1:1.0" "$Q2/sys/bus/usb/devices/1-3/1-3:1.0"
+echo ff > "$Q2/sys/bus/usb/devices/1-1/1-1:1.0/bInterfaceClass"; ln -s $Q2/drv/rtl88x2bu "$Q2/sys/bus/usb/devices/1-1/1-1:1.0/driver"
+echo " 1" > $Q2/sys/bus/usb/devices/1-1/bNumInterfaces; echo 500mA > $Q2/sys/bus/usb/devices/1-1/bMaxPower; echo 1 > $Q2/sys/bus/usb/devices/usb1/maxchild
+for f in idVendor:0bda idProduct:1a2b bDeviceClass:00 speed:480 bNumInterfaces:1 bMaxPower:500mA serial:CDSER55; do echo "${f#*:}" > $Q2/sys/bus/usb/devices/1-3/${f%%:*}; done
+echo 08 > "$Q2/sys/bus/usb/devices/1-3/1-3:1.0/bInterfaceClass"; ln -s $Q2/drv/usb-storage "$Q2/sys/bus/usb/devices/1-3/1-3:1.0/driver"
+# 묶음 I: 펌웨어 파일(유무만), 설계 5장의 유무 경로, insmod 파일, 커널 줄(개인정보가 섞인 가짜 줄 + 30줄로 20줄 상한)
+printf 'FWSECRET\n' > $Q2/mods/fw_bcmdhd.bin; mkdir -p $Q2/wd/hostapd $Q2/secd; echo "ssid=SECSSID" > $Q2/secd/softap.conf; : > $Q2/insmod
+{ q2i=0; while [ $q2i -lt 30 ]; do q2i=$((q2i+1)); echo "[  $q2i.000] usb 2-1: USB disconnect, device number $q2i"; done
+  echo "[ 40.100] usb 1-1: new high-speed USB device number 3 using ehci-tcc"
+  echo "[ 40.200] usb 1-1: New USB device found, idVendor=0bda, idProduct=b812, bcdDevice= 2.10"
+  echo "[ 40.201] usb 1-1: New USB device strings: Mfr=1, Product=2, SerialNumber=3"
+  echo "[ 40.202] usb 1-1: Product: Johns 802.11ac NIC"
+  echo "[ 40.203] usb 1-1: Manufacturer: Kims Realtek"
+  echo "[ 40.204] usb 1-1: SerialNumber: DMSERIAL77"
+  echo "[ 40.300] usb 1-2: New USB device found, idVendor=04e8, idProduct=6860"
+  echo "[ 40.400] input: Johns Keyboard as /devices/usb1/1-2"
+  echo "[ 40.450] generic-usb 0003:05AC:12A8.0001: hidraw0: USB HID v1.11 Device [Apple Inc. iPhone] on usb-tcc-1/input1"
+  echo "[ 40.460] usb 1-1: product = Johns Dongle"
+  echo "[ 40.470] usb 1-1: [Johns Phone] attached"
+  echo "[ 40.500] usb 1-1: rtl88x2bu mac aa:bb:cc:11:22:33 up"
+  echo "[ 40.600] hub 1-0:1.0: over-current change on port 1"
+  echo "[ 40.610] usb 1-1: device descriptor read/64, error -71"
+  echo "[ 40.620] usb 1-1: device not accepting address 4, error -71"
+  echo "[ 40.630] usb 1-1: can't set config #1, error -71"
+  echo "[ 40.640] usb 1-1: rejected 1 configuration due to insufficient available bus power"
+  echo "[ 40.650] usb 1-1: USB disconnect, device number 3 Johns 10.1.2.3"
+  echo "[ 40.700] wlan0: link up DHCP 192.168.43.20"
+  # 묶음 J 리뷰(중간): 니로 dmesg는 줄 머리에 로그 수준 "<6>"이 붙는다(logs/wifidiag-1107-snap2 꼴을 본뜬 가짜 값)
+  echo "<6>[   50.100] usb 3-1: new high-speed USB device number 4 using ehci-tcc"
+  echo "<6>[   50.200] usb 3-1: New USB device found, idVendor=1d6b, idProduct=0104"
+  echo "<6>[   50.300] usb 3-1: Product: Fake Modem Inc"
+  echo "<3>[   50.400] usb 3-1: device descriptor read/64, error -110"
+  echo "<6>[   50.500] usb 3-1: new LongWeirdSpeedWord USB device number 7 using ehci-tcc"
+  echo "<6>[   50.600] usb 3-1: Product: Johns over-current Gadget"; } > $Q2/dmesg
+export MISCWIFI=$Q2/wd SECSOFTAP=$Q2/secd/softap.conf INSMOD_SYS=$Q2/insmod KP_DMESG=$Q2/dmesg
+echo 0 > $Q2/proc/sys/kernel/modules_disabled; echo N > $Q2/sys/module/module/parameters/sig_enforce
+printf '%s\n' "CONFIG_MODULES=y" "# CONFIG_MODULE_SIG is not set" "CONFIG_MODVERSIONS=y" "CONFIG_CFG80211=m" "CONFIG_CMDLINE=\"androidboot.serialno=CFGSERIAL55\"" | gzip -c > $Q2/proc/config.gz
+printf '%s\n' "c0001 T cfg80211_scan_done" "c0002 T cfg80211_rx_mgmt" "c0003 t cfg80211_netdev_notifier" "c0004 T other_fn" > $Q2/proc/kallsyms
+# 묶음 J: 접두사별 기호(ieee80211_ 2, usb_ 3, netif_ 1, netdev 등록·할당 4)와 모듈 기호, 비슷하지만 아닌 이름(my_usb_x·register_netdevx)
+printf '%s\n' "c0005 T ieee80211_rx" "c0006 t ieee80211_tx [mac80211]" "c0007 T usb_register_driver" "c0008 T usb_submit_urb" "c0009 T usb_kill_urb" \
+  "c000a T netif_rx" "c000b T register_netdev" "c000c T unregister_netdev" "c000d T alloc_netdev_mqs" "c000e T alloc_etherdev_mqs" "c000f T my_usb_x" "c0010 T register_netdevx" >> $Q2/proc/kallsyms
+echo 2 > $Q2/proc/sys/kernel/kptr_restrict; echo 4096 > $Q2/proc/sys/kernel/tainted
+# 묶음 J: 디버그 정보가 든 .ko, USB 드라이버 폴더, bcmdhd 파라미터(MAC·IP 꼴·위험한 글자·못 읽는 것), 펌웨어 경로, 마운트 표, meminfo
+printf 'xx\0vermagic=3.18.24-tcc SMP preempt mod_unload ARMv7 p2v8 \0.rel.debug_info\0.rel.debug_line\0' > $Q2/mods/dbgmod.ko
+printf '\001\002\003' > $Q2/mods/nostr.ko
+# 묶음 J 리뷰(낮음 4): 심볼릭 링크 .ko는 읽지 않음
+ln -s $Q2/mods/bcmdhd.ko $Q2/mods/zlink.ko
+mkdir -p $Q2/sys/bus/usb/drivers/usb $Q2/sys/bus/usb/drivers/usb-storage $Q2/sys/bus/usb/drivers/rtl88x2bu "$Q2/sys/bus/usb/drivers/bad;name" $Q2/sys/module/bcmdhd/parameters $Q2/sys/module/firmware_class/parameters $Q2/fw1
+echo /system/wifi/fw_bcmdhd.bin > $Q2/sys/module/bcmdhd/parameters/firmware_path; echo /system/wifi/nvram.txt > $Q2/sys/module/bcmdhd/parameters/nvram_path
+echo 12:34:56:AB:CD:EF > $Q2/sys/module/bcmdhd/parameters/macaddr; echo "10.20.30.40" > $Q2/sys/module/bcmdhd/parameters/ipaddr; echo "10.20.30.41" > $Q2/sys/module/bcmdhd/parameters/gateway; echo 'x;rm -rf $(id)' > $Q2/sys/module/bcmdhd/parameters/weird
+echo secret > $Q2/sys/module/bcmdhd/parameters/locked; chmod 000 $Q2/sys/module/bcmdhd/parameters/locked
+# 묶음 J 리뷰(낮음 1·2): 이름에 serial이 든 것, 12자리 16진, -로 이은 MAC 꼴, 판 번호(이름·앞 낱말로 가림 안 함), 60개 상한
+echo SN12345XYZ > $Q2/sys/module/bcmdhd/parameters/serialno; echo 123456abcdef > $Q2/sys/module/bcmdhd/parameters/cookie; echo 12-34-56-AB-CD-EF > $Q2/sys/module/bcmdhd/parameters/hw
+echo "1.201.59.2 (r123)" > $Q2/sys/module/bcmdhd/parameters/info_string; echo 7.35.1.2 > $Q2/sys/module/bcmdhd/parameters/fw_version; echo "version 9.8.7.6" > $Q2/sys/module/bcmdhd/parameters/build
+q2i=0; while [ $q2i -lt 60 ]; do q2i=$((q2i+1)); echo $q2i > $Q2/sys/module/bcmdhd/parameters/zz$(printf %02d $q2i); done
+echo /vendor/firmware/ > $Q2/sys/module/firmware_class/parameters/path
+printf '%s\n' "rootfs / rootfs ro,seclabel,relatime 0 0" "/dev/block/mmcblk0p12 /data ext4 rw,seclabel,nosuid,nodev,noatime,noexec,data=ordered 0 0" \
+  "/dev/block/platform/bdm/by-name/system /system ext4 ro,seclabel,relatime,context=u:object_r:system_file:s0 0 0" "/dev/block/sda1 /storage/usb0 vfat rw,SERIALMNT9 0 0" > $Q2/mounts
+printf '%s\n' "MemTotal: 2000000 kB" "MemFree: 300000 kB" "VmallocTotal: 245760 kB" "VmallocUsed: 81920 kB" "VmallocChunk: 120000 kB" > $Q2/meminfo
+export FWDIRS="$Q2/fw1 $Q2/fw2" KMOUNTS=$Q2/mounts MEMINFO=$Q2/meminfo
+printf '%s\n' "Processor : ARMv7" "Hardware : tcc803x" "Serial : 00000000CPUSER42" > $Q2/proc/cpuinfo
+echo "console=ttyS0 androidboot.serialno=SERIALZZ99 androidboot.btaddr=12:34:56:78:9A:BC wifimac=DE:AD:BE:EF:00:11" > $Q2/proc/cmdline
+echo 1.201.59 > $Q2/sys/module/bcmdhd/version; echo 1 > $Q2/sys/fs/selinux/enforce
+for f in idVendor:1d6b idProduct:0002 bDeviceClass:09 speed:480 serial:HCDSERIAL123 product:EHCI-홍길동폰 manufacturer:Kims-Phone; do echo "${f#*:}" > $Q2/sys/bus/usb/devices/usb1/${f%%:*}; done
+for f in idVendor:0bda idProduct:b812 bDeviceClass:00 speed:480 serial:DONGLESER777 product:Johns-phone manufacturer:Realtek; do echo "${f#*:}" > $Q2/sys/bus/usb/devices/1-1/${f%%:*}; done
+echo aa:bb:cc:dd:ee:ff > $Q2/sys/class/net/wlan0/address; echo 11:22:33:44:55:66 > $Q2/sys/class/net/rtwlan0/address; : > $Q2/sys/class/net/rtwlan0/phy80211; echo 66:55:44:33:22:11 > $Q2/sys/class/net/eth0/address
+printf '0x02d0\n' > "$Q2/sys/bus/sdio/devices/mmc1:0001:1/vendor"; printf '0xa9bf\n' > "$Q2/sys/bus/sdio/devices/mmc1:0001:1/device"; printf '0x07\n' > "$Q2/sys/bus/sdio/devices/mmc1:0001:1/class"
+echo MMC > "$Q2/sys/bus/mmc/devices/mmc0:0001/type"; echo CIDSECRET9 > "$Q2/sys/bus/mmc/devices/mmc0:0001/cid"; echo 0xMMCSER8 > "$Q2/sys/bus/mmc/devices/mmc0:0001/serial"; echo 홍길동폰 > "$Q2/sys/bus/mmc/devices/mmc0:0001/name"
+printf 'xx\0vermagic=3.18.24-tcc SMP preempt mod_unload ARMv7 p2v8 \0yy\0SECRETKO7\0' > $Q2/mods/bcmdhd.ko
+# 리뷰 반영: USB로 꽂아 둔 폰(삼성 04e8 b모델 6860), 링크로 같은 실제 폴더(같은 .ko가 두 번 나오면 안 됨),
+# 순정 hostapd는 실행되면 표시 파일을 남기는 가짜(판 문자열은 파일 안에)
+mkdir -p $Q2/sys/bus/usb/devices/1-2; for f in idVendor:04e8 idProduct:6860 bDeviceClass:00 speed:480; do echo "${f#*:}" > $Q2/sys/bus/usb/devices/1-2/${f%%:*}; done
+ln -s $Q2/mods $Q2/modlink
+printf '#!/bin/sh\n: > %s/hostapd-ran\necho "hostapd v9.9-run"\nexit 0\nhostapd v2.6-devel\n' $Q2 > $Q2/hostapd; chmod +x $Q2/hostapd
+q2rep() { (KPROC=$1 KSYS=$2 NAPPS=$Q2/apps KMODDIRS=$3 STOCK_HOSTAPD=${4:-$Q2/hostapd}; export KPROC KSYS NAPPS KMODDIRS STOCK_HOSTAPD; HMGLOG=$T/hlm STATUS=$STF BB=$T/bin/bb APP=$T/app SRC=$T/softap.conf W=$T/w sh $T/st.sh >/dev/null 2>&1); }
+Q2T0=$(date +%s); q2rep $Q2/proc $Q2/sys "$Q2/mods $Q2/modlink"; Q2T1=$(date +%s); cp $R $Q2/r1.md
+sed -n '/^## 동글 조사 정보/,/^## /p' $Q2/r1.md > $Q2/sec.md
+check "1.7.4 Q-2: 리포트에 '동글 준비 정보' 칸: 커널 판·gcc·빌드 표시, 모듈 목록·bcmdhd 판, 서명·금지·config 줄, cfg80211 기호 수, SoC, SELinux" 'grep -q "^## 동글 조사 정보" $Q2/sec.md && grep -q "^- 커널: 3.18.24-tcc / gcc 4.7 / 빌드 #1 SMP PREEMPT" $Q2/sec.md && grep -q "^- 올라온 모듈(27개):$" $Q2/sec.md && grep -q "^  - bcmdhd cfg80211 vpu_d6_lib_v3_18_1 " $Q2/sec.md && grep -q "^- 모듈 bcmdhd: 있음 (올린 모듈, version 1.201.59" $Q2/sec.md && grep -q "sig_enforce): N, 모듈 금지(modules_disabled): 0" $Q2/sec.md && grep -q "^  - CONFIG_MODVERSIONS=y" $Q2/sec.md && grep -q "kallsyms 기호 3개, /sys/class/ieee80211: 예" $Q2/sec.md && grep -q "cpuinfo tcc803x" $Q2/sec.md && grep -q "SELinux enforce: 1" $Q2/sec.md'
+check "  Q-2: .ko 이름과 vermagic, bcmdhd.ko 있음, SDIO vendor·device·class, MMC는 type만, softap.conf 경로, USB ID·클래스·속도, 장치 이름(무선 표시), 다른 동글 패키지" 'grep -q "^- 모듈 파일: .*/mods/bcmdhd.ko 크기 [0-9]* md5 [0-9a-f]* 디버그 정보 아니요 (vermagic=3.18.24-tcc SMP preempt mod_unload ARMv7 p2v8" $Q2/sec.md && grep -q "^- bcmdhd.ko: 예" $Q2/sec.md && grep -q "SDIO 장치: vendor 0x02d0 device 0xa9bf class 0x07" $Q2/sec.md && grep -q "^- MMC 장치: mmc0:0001 type MMC$" $Q2/sec.md && grep -q "^- softap.conf 위치: $T/softap.conf" $Q2/sec.md && grep -q "^- USB 1-1: 0bda:b812 class 00 speed 480, 인터페이스 1개(ff), 드라이버 rtl88x2bu, 전류 500mA (RTL88x2BU 드라이버 표에 있는 ID)$" $Q2/sec.md && grep -q "^- USB usb1: 1d6b:0002 class 09 speed 480, 인터페이스 ?개(없음), 드라이버 없음, 전류 없음, 포트 1$" $Q2/sec.md && grep -q "eth0 rtwlan0(무선) wlan0(무선)" $Q2/sec.md && grep -q "usbwifi.hotspot 예, stock.hotspot 아니요" $Q2/sec.md'
+check "  Q-2 리뷰: 순정 hostapd는 실행하지 않고 파일의 판 문자열만(hostapd v2.6-devel), 링크로 같은 실제 폴더의 .ko는 한 번만" '[ ! -f $Q2/hostapd-ran ] && grep -q "^- 순정 hostapd 판: hostapd v2.6-devel$" $Q2/sec.md && ! grep -q "v9.9-run" $Q2/r1.md && [ "$(grep -c "^- 모듈 파일: .*/bcmdhd.ko " $Q2/sec.md)" = 1 ]'
+# 1.7.4(묶음 C 리뷰 낮음 4): 폰 회사 목록에 HTC 0bb4·레노버 17ef·팬택 10a9·ZTE 19d2. 에이수스 0b05(동글 회사)는 넣지 않음
+# (폴더 이름은 번호로: 맥 파일 시스템은 대소문자를 가리지 않아 0BB4x와 0bb4x가 같은 폴더가 된다)
+q2n=0; for v in 0bb4:0c02 17ef:7b81 10a9:6050 19d2:1405 0b05:1841 0BB4:0c03; do q2n=$((q2n+1)); mkdir -p $Q2/u/d$q2n; echo ${v%%:*} > $Q2/u/d$q2n/idVendor; echo ${v#*:} > $Q2/u/d$q2n/idProduct; done
+Q2U=$( { echo 'BB='$T'/bin/bb'; sed -n -e "/^dn_hex4() {/p" -e "/^dn_first() {/p" -e "/^dn_is_phone() {/,/^}/p" -e "/^dn_usb_id() {/,/^}/p" $PKG/bin/status.sh; for d in 1 2 3 4 5 6; do echo "dn_usb_id $Q2/u/d$d"; done; } | sh 2>/dev/null | tr '\n' ' ')
+check "  C 리뷰: HTC·레노버·팬택·ZTE(대문자 포함)도 '(폰)', 에이수스 0b05는 제품 ID 그대로" '[ "$Q2U" = "0bb4:(폰) 17ef:(폰) 10a9:(폰) 19d2:(폰) 0b05:1841 0BB4:(폰) " ]'
+mkdir -p $Q2/u/d7; echo 05AC > $Q2/u/d7/idVendor; echo 12a8 > $Q2/u/d7/idProduct
+Q2V=$( { echo 'BB=; PATH=/bin'; sed -n -e "/^dn_hex4() {/p" -e "/^dn_first() {/p" -e "/^dn_is_phone() {/,/^}/p" -e "/^dn_usb_id() {/,/^}/p" $PKG/bin/status.sh; echo "dn_usb_id $Q2/u/d7"; } | /bin/sh 2>/dev/null)
+check "  D 리뷰: busybox·awk가 없어도 폰 제품 ID를 가림(05AC:12a8 → 05AC:(폰))" '[ "$Q2V" = "05AC:(폰)" ]'
+check "  Q-2 리뷰: 폰 회사 제조사 ID(04e8 등)면 제품 ID를 쓰지 않음(04e8:(폰)), 동글·허브는 그대로" 'grep -q "^- USB 1-2: 04e8:(폰) class 00 speed 480, " $Q2/sec.md && ! grep -q "6860" $Q2/r1.md && grep -q "^- USB 1-1: 0bda:b812 " $Q2/sec.md'
+check "  Q-2 리뷰(소스 검사): 동글 준비 정보 칸은 hostapd·wpa_supplicant 등 어떤 바이너리도 실행하지 않음(-v 실행 없음, \$BB 도구만)" 'sed -n "/^dongle_info() {/,/^}/p" $PKG/bin/status.sh > $Q2/fn && [ -s $Q2/fn ] && ! grep -q "hostapd -v\|STOCK_HOSTAPD -\|wpa_supplicant\|/system/bin/[a-z]" $Q2/fn'
+check "  Q-2: 심은 일련번호·MAC·폰·사람 이름·빌드한 사람@호스트·커널 명령줄 값·config의 serialno·.ko 안 다른 문자열이 리포트 전체에 한 글자도 없음" '! grep -q -e secretbuilder -e HOSTX -e SERIALZZ99 -e "12:34:56" -e "DE:AD" -e HCDSERIAL123 -e 홍길동 -e Kims -e DONGLESER777 -e Johns -e Realtek -e "aa:bb:cc" -e "11:22:33" -e "66:55:44" -e CIDSECRET9 -e MMCSER8 -e CPUSER42 -e CFGSERIAL55 -e SECRETKO7 -e "EHCI" -e CDSER55 -e FWSECRET -e SECSSID -e DMSERIAL77 -e "Kims" -e "Johns" -e "aa:bb:cc:11" -e "6860" $Q2/r1.md'
+q2rep $Q2/empty $Q2/empty $Q2/empty $Q2/empty/hostapd; cp $R $Q2/r2.md; sed -n '/^## 동글 조사 정보/,/^## /p' $Q2/r2.md > $Q2/sec2.md
+check "  Q-2: /proc·/sys에 아무것도 없으면 '확인 안 됨'·'없음' 줄로 끝까지 가고 리포트도 끝까지 만듦" 'grep -q "^- 커널: 확인 안 됨" $Q2/sec2.md && grep -q "^- 순정 hostapd 판: 확인 안 됨" $Q2/sec2.md && grep -q "^- 올라온 모듈: 확인 안 됨" $Q2/sec2.md && grep -q "^- 커널 설정(config.gz): 없음" $Q2/sec2.md && grep -q "cfg80211: kallsyms 확인 안 됨," $Q2/sec2.md && grep -q "^- USB 장치: 확인 안 됨" $Q2/sec2.md && grep -q "^- 모듈 파일(.ko): 없음" $Q2/sec2.md && grep -q "sig_enforce): 파일 없음(서명 기능 없음으로 봄)," $Q2/sec2.md && grep -q "^- 커널 기호 수(1.8.0 조사용, 이름은 적지 않음): 읽지 못함$" $Q2/sec2.md && grep -q "^- kptr_restrict: 읽지 못함, tainted: 읽지 못함$" $Q2/sec2.md && grep -q "^- USB 드라이버(/sys/bus/usb/drivers): 없음$" $Q2/sec2.md && grep -q "^- bcmdhd 파라미터: 없음$" $Q2/sec2.md && grep -q "^- 모듈 cfg80211: 없음 (/sys/module에 없음)$" $Q2/sec2.md && grep -q "^- 펌웨어 파일(.bin): 없음$" $Q2/sec2.md && grep -q "^- cfg80211 규제 국가(ieee80211_regdom): 없음$" $Q2/sec2.md && grep -q "^- 네트워크 장치: 확인 안 됨" $Q2/sec2.md && grep -q "^_만든 시각 " $Q2/r2.md'
+check "  묶음 I ①: 모듈 목록이 잘리지 않음(27개, 10개씩 3줄, 마지막 이름까지), bcmdhd 올린 모듈·cfg80211 커널 내장·mac80211 없음" '[ "$(grep -c "^  - .*vpu_d6_lib_v3_18_" $Q2/sec.md)" = 3 ] && grep -q "vpu_d6_lib_v3_18_25$" $Q2/sec.md && grep -q "^- 모듈 cfg80211: 있음 (커널 내장, " $Q2/sec.md && grep -q "^- 모듈 mac80211: 없음 (/sys/module에 없음)$" $Q2/sec.md'
+check "  묶음 I ②⑦: 가상 CD 모드 ID(0bda:1a2b, 저장 장치) 표시, 저장 장치 드라이버 이름" 'grep -q "^- USB 1-3: 0bda:1a2b class 00 speed 480, 인터페이스 1개(08), 드라이버 usb-storage, 전류 500mA (가상 CD 모드의 동글일 수 있음)$" $Q2/sec.md'
+check "  묶음 I ③: 펌웨어 파일은 있는지만(이름, 링크로 같은 폴더는 한 번), 내용 없음" '[ "$(grep -c "^- 펌웨어 파일: .*/fw_bcmdhd.bin 있음$" $Q2/sec.md)" = 1 ] && ! grep -q FWSECRET $Q2/r1.md'
+check "  묶음 I ④: Wi-Fi 속성 두 값, hostapd 폴더·/securedata softap.conf 유무(내용 없음), 규제 국가 KR, insmod 파일·busybox 애플릿" 'grep -q "^- Wi-Fi 속성: wifi.interface 0, wlan.driver.status 0$" $Q2/sec.md && grep -q "/hostapd 폴더: 예, .*softap.conf: 있음$" $Q2/sec.md && ! grep -q SECSSID $Q2/r1.md && grep -q "^- cfg80211 규제 국가(ieee80211_regdom): KR$" $Q2/sec.md && grep -q "^- insmod: .*/insmod 예, busybox 애플릿 " $Q2/sec.md'
+check "  묶음 I ⑤·J 리뷰(중간): 커널 줄은 허용한 꼴만 다시 적어 마지막 20줄 — 장치 연결·ID(폰은 phone)·끊김·과전류·설명자 오류·주소·설정·전류 부족 줄은 나오고, 재현 줄(HID [Apple Inc. iPhone])·Product·Manufacturer·SerialNumber·product =·대괄호 이름·MAC·IP·꼬리 글자는 없음" 'sed -n "/^- USB를 꽂을 때의 커널 줄/,/^- [^ ]/p" $Q2/sec.md > $Q2/dm.md && [ "$(grep -c "^  - " $Q2/dm.md)" = 20 ] && grep -qx "  - \[40.100\] usb 1-1: new high-speed USB device number 3 using ehci-tcc" $Q2/dm.md && grep -qx "  - \[40.200\] usb 1-1: New USB device found, idVendor=0bda, idProduct=b812" $Q2/dm.md && grep -qx "  - \[40.300\] usb 1-2: New USB device found, idVendor=04e8, idProduct=phone" $Q2/dm.md && grep -qx "  - \[40.600\] hub 1-0:1.0: over-current change on port 1" $Q2/dm.md && grep -qx "  - \[40.610\] usb 1-1: device descriptor read/64, error -71" $Q2/dm.md && grep -qx "  - \[40.620\] usb 1-1: device not accepting address 4, error -71" $Q2/dm.md && grep -qx "  - \[40.630\] usb 1-1: can not set config #1, error -71" $Q2/dm.md && grep -qx "  - \[40.640\] usb 1-1: configuration rejected (insufficient bus power)" $Q2/dm.md && grep -qx "  - \[40.650\] usb 1-1: USB disconnect, device number 3" $Q2/dm.md && grep -q "device number 24$" $Q2/dm.md && ! grep -q "device number 23$" $Q2/dm.md && grep -qx "  - \[50.100\] usb 3-1: new high-speed USB device number 4 using ehci-tcc" $Q2/dm.md && grep -qx "  - \[50.200\] usb 3-1: New USB device found, idVendor=1d6b, idProduct=0104" $Q2/dm.md && grep -qx "  - \[50.400\] usb 3-1: device descriptor read/64, error -110" $Q2/dm.md && grep -qx "  - \[50.500\] usb 3-1: new ? USB device number 7 using ehci-tcc" $Q2/dm.md && [ "$(grep -c "over-current" $Q2/dm.md)" = 1 ] && ! grep -q -e "<6>" -e "<3>" -e Fake -e Gadget -e LongWeird $Q2/dm.md && ! grep -q -i -e SerialNumber -e "Product:" -e "Manufacturer:" -e "input:" -e Apple -e iPhone -e 05ac -e 12a8 -e hidraw -e "product =" -e Johns -e Kims -e "aa:bb:cc" -e "10.1.2" -e DHCP -e bcdDevice $Q2/dm.md'
+# 묶음 I ④: busybox 애플릿 확인 함수(기능 목록에서 낱말로 찾음, 목록이 안 나오면 "확인 안 됨")
+printf '#!/bin/sh\n[ $# = 0 ] || exec %s/bin/bb "$@"\necho "BusyBox v1.8.1 multi-call binary" >&2\nprintf "Currently defined functions:\\n\\tash, cat, insmod, ls\\n" >&2\nexit 1\n' $T > $Q2/bbhas; printf '#!/bin/sh\n[ $# = 0 ] || exec %s/bin/bb "$@"\nprintf "Currently defined functions:\\n\\tash, cat, insmodx, ls\\n"\n' $T > $Q2/bbno; chmod +x $Q2/bbhas $Q2/bbno
+Q2H=$( { sed -n "/^dn_bb_has() {/,/^}/p" $PKG/bin/status.sh; echo 'BB='$Q2'/bbhas; dn_bb_has insmod; BB='$Q2'/bbno; dn_bb_has insmod; BB='$T'/bin/bb; dn_bb_has insmod'; } | sh 2>/dev/null | tr '\n' ' ')
+check "  묶음 I ④: busybox 애플릿 확인 — 목록에 insmod가 있으면 예(표준오류로 나와도), 비슷한 이름뿐이면 아니요, 목록이 안 나오면 확인 안 됨" '[ "$Q2H" = "예 아니요 확인 안 됨 " ]'
+# 묶음 I ②: 드라이버 이름은 cd -P가 안 되는 셸이면 ls -l의 링크 대상으로, 그것도 안 되면 "읽지 못함"(링크가 없으면 빈 값)
+Q2L=$( { echo 'BB='$T'/bin/bb'; sed -n -e "/^dn_safe() {/p" -e "/^dn_link_name() {/,/^}/p" $PKG/bin/status.sh; echo 'L='$Q2'/sys/bus/usb/devices/1-1/1-1:1.0/driver; echo "a=$(dn_link_name $L)"; pwd() { return 1; }; echo "b=$(dn_link_name $L)"; BB=false; echo "c=$(dn_link_name $L)"; echo "d=$(dn_link_name '$Q2'/nolink)"'; } | sh 2>/dev/null | tr '\n' ' ')
+check "  묶음 I ②: 드라이버 이름 — cd -P로 rtl88x2bu, cd -P가 안 되면 ls -l 링크 대상으로 rtl88x2bu, 둘 다 안 되면 '읽지 못함', 링크 없으면 빈 값" '[ "$Q2L" = "a=rtl88x2bu b=rtl88x2bu c=읽지 못함 d= " ]'
+check "  묶음 I ③(소스): 리포트·진단 USB의 기본 모듈 폴더에 /system/wifi가 있음" 'grep -q "^KMODDIRS=\${KMODDIRS:-/system/wifi " $PKG/bin/status.sh && grep -q "^KMODDIRS=\${KMODDIRS:-/system/wifi " $B/usb-donglediag/NEMESIS.sh'
+Q2K5=$(md5 -q $Q2/mods/bcmdhd.ko); Q2KZ=$(wc -c < $Q2/mods/bcmdhd.ko | tr -d " ")
+check "  묶음 J (가): 모듈 파일 줄에 실제 경로·크기·md5·디버그 정보(예/아니요)·vermagic" 'grep -q "^- 모듈 파일: .*/mods/bcmdhd.ko 크기 $Q2KZ md5 $Q2K5 디버그 정보 아니요 (vermagic=" $Q2/sec.md && grep -q "^- 모듈 파일: .*/mods/dbgmod.ko 크기 [0-9]* md5 [0-9a-f]* 디버그 정보 예 (vermagic=" $Q2/sec.md && grep -q "^- 모듈 파일: .*/mods/nostr.ko 크기 3 md5 [0-9a-f]* 디버그 정보 읽지 못함 (vermagic 확인 안 됨)$" $Q2/sec.md && grep -q "^- 모듈 파일: .*/mods/zlink.ko 크기 읽지 못함, 건너뜀$" $Q2/sec.md'
+Q2KS=$(printf '%s\n' cfg80211_scan_done cfg80211_rx_mgmt cfg80211_netdev_notifier ieee80211_rx ieee80211_tx usb_register_driver usb_submit_urb usb_kill_urb netif_rx register_netdev unregister_netdev alloc_netdev_mqs alloc_etherdev_mqs | LC_ALL=C sort | md5 -q)
+check "  묶음 J (나): 커널 기호 접두사별 개수(이름은 적지 않음)와 그 이름 정렬 목록의 md5, 주소 없음" 'grep -q "^- 커널 기호 수(1.8.0 조사용, 이름은 적지 않음): cfg80211_ 3, ieee80211_ 2, usb_ 3, netif_ 1, netdev 등록·할당 4$" $Q2/sec.md && grep -q "^- 위 기호 이름 목록(정렬)의 md5: $Q2KS$" $Q2/sec.md && ! grep -q -e c0001 -e usb_submit_urb -e alloc_etherdev_mqs $Q2/sec.md && grep -q "kallsyms 기호 3개," $Q2/sec.md'
+check "  묶음 J (다)(라): kptr_restrict·tainted 값, USB 드라이버 이름 목록(허용 글자만)" 'grep -q "^- kptr_restrict: 2, tainted: 4096$" $Q2/sec.md && grep -q "^- USB 드라이버(/sys/bus/usb/drivers, 이름만):$" $Q2/sec.md && grep -q "^  - badname rtl88x2bu usb usb-storage$" $Q2/sec.md'
+check "  묶음 J (마): bcmdhd 파라미터 이름과 값(MAC·IP 꼴 가림, 위험한 글자 지움, 못 읽으면 표시), 펌웨어 찾는 경로, 펌웨어 폴더 유무" 'grep -q "^  - firmware_path = /system/wifi/fw_bcmdhd.bin$" $Q2/sec.md && grep -q "^  - macaddr = 가림$" $Q2/sec.md && grep -q "^  - serialno = 가림$" $Q2/sec.md && grep -q "^  - cookie = mac-masked$" $Q2/sec.md && grep -q "^  - hw = mac-masked$" $Q2/sec.md && grep -q "^  - info_string = 1.201.59.2r123$" $Q2/sec.md && grep -q "^  - fw_version = 7.35.1.2$" $Q2/sec.md && grep -q "^  - build = version9.8.7.6$" $Q2/sec.md && [ "$(grep -c "^  - zz[0-9]* = " $Q2/sec.md)" = 47 ] && grep -q "^  - 나머지 13개 생략$" $Q2/sec.md && ! grep -q -e SN12345 -e 123456abcdef -e "12-34-56" $Q2/r1.md && grep -q "^  - ipaddr = 가림$" $Q2/sec.md && grep -q "^  - gateway = ip-masked$" $Q2/sec.md && grep -q "^  - weird = xrm-rfid$" $Q2/sec.md && grep -q "^  - locked = 읽지 못함 또는 빈 값$" $Q2/sec.md && ! grep -q -e "12:34:56" -e "10.20.30" -e secret $Q2/r1.md && grep -q "^- 펌웨어 찾는 경로(firmware_class path): /vendor/firmware/$" $Q2/sec.md && grep -q "^- 펌웨어 폴더: .*/fw1 예, .*/fw2 아니요$" $Q2/sec.md'
+check "  묶음 J (바)(사): /data·/system 마운트(장치 이름은 숫자를 N으로, ro·noexec 여부, 다른 마운트·SELinux 문맥 글자 없음), vmalloc 세 값, 코어 수는 다른 칸을 가리킴, 서명 줄" 'grep -q "^  - /data: /dev/block/mmcblkNpN ext4, ro 아니요, noexec 예, 옵션 rw,seclabel,nosuid,nodev,noatime,noexec,data=ordered$" $Q2/sec.md && grep -q "^  - /system: /dev/block/platform/bdm/by-name/system ext4, ro 예, noexec 아니요, 옵션 ro,seclabel,relatime,context=uobject_rsystem_files0$" $Q2/sec.md && ! grep -q -e SERIALMNT9 -e usb0 $Q2/sec.md && grep -q "^- vmalloc: 전체 245760 kB, 사용 81920 kB, 가장 큰 빈 덩어리 120000 kB (MemFree는 부하·소리 지연 측정 칸)$" $Q2/sec.md && grep -q "^- 코어 수: 부하·소리 지연 측정 칸의 .코어 수. 줄을 보세요$" $Q2/sec.md'
+# 묶음 J (가): 상한 — 모듈 파일 수(KO_MAX)와 크기(KO_BIG), 못 읽는 파일
+(KO_MAX=1 KO_BIG=40; export KO_MAX KO_BIG; q2rep $Q2/proc $Q2/sys "$Q2/mods"); sed -n '/^## 동글 조사 정보/,/^## /p' $R > $Q2/sec3.md
+check "  묶음 J (가): 모듈 파일은 상한 개수까지만 적고 '넘어 나머지는 적지 않음', 상한 크기를 넘으면 크기만 적고 md5·디버그는 건너뜀" '[ "$(grep -c "^- 모듈 파일: .*\.ko 크기" $Q2/sec3.md)" = 1 ] && grep -q "^- 모듈 파일: 1개가 넘어 나머지는 적지 않음$" $Q2/sec3.md && grep -q "^- 모듈 파일: .*\.ko 크기 [0-9]* (큼, md5·vermagic·디버그 정보는 건너뜀)$" $Q2/sec3.md'
+chmod 000 $Q2/mods/dbgmod.ko; q2rep $Q2/proc $Q2/sys "$Q2/mods"; chmod 644 $Q2/mods/dbgmod.ko; sed -n '/^## 동글 조사 정보/,/^## /p' $R > $Q2/sec4.md
+check "  묶음 J (가): 못 읽는 모듈 파일은 크기와 '(읽지 못함)'만, 리포트는 끝까지" 'grep -q "^- 모듈 파일: .*/dbgmod.ko 크기 [0-9]* (읽지 못함)$" $Q2/sec4.md && grep -q "^- 다른 동글 패키지:" $Q2/sec4.md'
+echo "  (Q-2 리포트 만들기 시간 PC: $((Q2T1 - Q2T0))초)"
+# 1.7.4(묶음 C 리뷰 중간 1): 동글 정보 칸이 부르는 모든 명령의 인자에 hostapd·wpa_supplicant 글자가 없음(서비스의 ps grep에 걸리지 않게).
+# dongle_info와 도움 함수만 떼어 인자를 적는 가짜 bb로 돌린다. 변이: strings를 표준입력 대신 경로 인자로 되돌린 사본은 잡혀야 함
+printf '#!/bin/sh\necho "$*" >> %s/bbargs\nexec %s/bin/bb "$@"\n' $Q2 $T > $Q2/bbrec; chmod +x $Q2/bbrec
+sed -n "/^# 1.7.4(Q-2): 1.8.0 USB/,/^report() {/p" $PKG/bin/status.sh | sed '$d' > $Q2/dfn.sh
+q2args() { rm -f $Q2/bbargs; { echo 'BB='$Q2'/bbrec; yn() { if "$@" >/dev/null 2>&1; then echo 예; else echo 아니요; fi; }; getprop() { echo 0; }; SRC='$T'/softap.conf; KPROC='$Q2'/proc KSYS='$Q2'/sys NAPPS='$Q2'/apps KMODDIRS='$Q2'/mods STOCK_HOSTAPD='$Q2'/hostapd'; cat "$1"; echo dongle_info; } | sh > $Q2/dout 2>/dev/null; }
+q2args $Q2/dfn.sh
+check "  C 리뷰: 동글 정보 칸의 모든 명령 인자에 hostapd·wpa_supplicant가 없고(표준입력으로 넘김), 판 문자열은 그대로 읽힘" '[ -s $Q2/bbargs ] && grep -q "^strings" $Q2/bbargs && ! grep -q -i "hostapd\|wpa_supplicant" $Q2/bbargs && grep -q "^- 순정 hostapd 판: hostapd v2.6-devel$" $Q2/dout'
+check "  묶음 J (나): 동글 정보 칸이 /proc/kallsyms를 한 번만 읽음(인자를 적는 가짜 bb), /proc/cmdline은 읽지 않음" '[ "$(grep -c "kallsyms" $Q2/bbargs)" = 1 ] && ! grep -q cmdline $Q2/bbargs'
+sed 's#strings < "$STOCK_HOSTAPD"#strings "$STOCK_HOSTAPD"#' $Q2/dfn.sh > $Q2/dfn-bad.sh; q2args $Q2/dfn-bad.sh
+check "  C 리뷰(변이 시험): strings에 경로를 인자로 넘긴 사본은 이 검사에 걸림(hostapd가 인자에 나타남)" '! cmp -s $Q2/dfn.sh $Q2/dfn-bad.sh && grep -q "hostapd" $Q2/bbargs'
+chmod -R u+rwx $Q2 2>/dev/null; rm -rf $Q2; unset MISCWIFI SECSOFTAP INSMOD_SYS KP_DMESG FWDIRS KMOUNTS MEMINFO
 # 뒤의 검사가 보통 리포트(기본 설정 경로)를 보도록 다시 만든다
 HMGLOG=$T/hlm STATUS=$STF BB=$T/bin/bb APP=$T/app SRC=$T/softap.conf W=$T/w sh $T/st.sh >/dev/null
 rm -f $T/hk.conf
@@ -2097,6 +2492,42 @@ check "우리 hostapd 인식" 'grep -q "우리 hostapd: 예" $R'
 check "wifi.direct를 wifi로 착각하지 않음" 'grep -q "android.hardware.wifi: 아니요" $R'
 rm -f $T/nowififeat
 check "니로: 상태 화면 tested=yes, 리포트 '확인된 차: 예'" 'grep -qx "tested=yes" $STF && grep -q "확인된 차: 예" $R'
+# 1.7.4(O-5): 리포트 "## 내비(헤드유닛)" 칸의 화면 줄(1.8.0 Launch 화면 배치 근거). dumpsys가 없거나 줄이 없어도 리포트는 끝까지 간다
+check "  O-5: dumpsys가 없으면 '- 화면: 읽지 못함'으로 적고 리포트는 끝까지 만듦" 'grep -q "^- 화면: 읽지 못함, 밀도 속성 " $R && grep -q "^- 이 패키지 버전: " $R && grep -q "확인된 차: 예" $R'
+O5=$T/o5; mkdir -p $O5/bin $O5/sys/class/graphics/fb0; echo "1920,1440" > $O5/sys/class/graphics/fb0/virtual_size
+printf '#!/bin/sh\ncase "$1" in ro.sf.lcd_density) cat %s/dens 2>/dev/null ;; *) exec %s/bin/getprop "$@" ;; esac\n' $O5 $T > $O5/bin/getprop
+cat > $O5/bin/dumpsys <<E
+#!/bin/sh
+echo "\$*" >> $O5/dargs
+[ -f $O5/nodisp ] && exit 0
+[ -f $O5/err ] && { echo "Can't find service: window"; exit 1; }
+echo "WINDOW MANAGER DISPLAY CONTENTS (dumpsys window displays)"
+echo "  Display: mDisplayId=0"
+if [ -f $O5/odd ]; then echo '    init=1280x720\$(id) 160dpi cur=12;80x720 app=1280x672 name=홍길동폰 rng=720x672-1280x1232'
+else echo "    init=1920x720 160dpi cur=1920x720 app=1920x660 rng=720x660-1920x1860"; fi
+echo "  Display: mDisplayId=1"
+echo "    init=1280x480 120dpi cur=1280x480 app=1280x480 rng=480x480-1280x1280"
+E
+chmod +x $O5/bin/getprop $O5/bin/dumpsys; echo 160 > $O5/dens
+# status.sh 사본(stl.sh)은 PATH를 스스로 정하므로(fixpath) 그 줄 앞에 가짜 dumpsys·getprop 폴더를 끼운 사본을 만들고,
+# 그것을 부르는 st.sh 사본으로 돌린다
+# status.sh는 $APP/svc/hotspot.sh를 불러 쓰고 그 파일도 PATH를 다시 정한다. 그래서 패키지 사본($O5/app)의 두 스크립트에도 같은 PATH를 넣는다
+sed "s#^export PATH=#export PATH=$O5/bin:#" $T/stl.sh > $O5/stl.sh; sed "s#$T/stl.sh#$O5/stl.sh#g" $T/st.sh > $O5/st.sh
+cp -R $T/app $O5/app
+for _f in bin/status.sh svc/hotspot.sh; do sed "s#^export PATH=#export PATH=$O5/bin:#" $T/app/$_f > $O5/app/$_f; done
+check "  O-5: 시험 준비(가짜 dumpsys 폴더가 사본 세 곳의 PATH 맨 앞에 들어감)" 'grep -q "^export PATH=$O5/bin:" $O5/stl.sh && grep -q "$O5/stl.sh --report" $O5/st.sh && grep -q "^export PATH=$O5/bin:" $O5/app/bin/status.sh && grep -q "^export PATH=$O5/bin:" $O5/app/svc/hotspot.sh'
+o5rep() { KSYS=$O5/sys HMGLOG=$T/hlm STATUS=$STF BB=$T/bin/bb APP=$O5/app SRC=$T/softap.conf W=$T/w sh $O5/st.sh >/dev/null 2>&1; grep "^- 화면: " $R > $O5/line; }
+o5rep
+check "  O-5: 첫 화면의 init·dpi·cur·app만 적고(rng·둘째 화면은 뺌) 밀도 속성·fb0를 붙임" '[ "$(cat $O5/line)" = "- 화면: init=1920x720 160dpi cur=1920x720 app=1920x660, 밀도 속성 160, fb0 1920,1440" ]'
+check "  O-5: dumpsys는 window displays로만 부르고, 화면 줄은 onebin 줄 바로 다음 한 줄" '[ "$(sort -u $O5/dargs)" = "window displays" ] && [ "$(grep -c "^- 화면: " $R)" = 1 ] && [ "$(grep -A1 "^- onebin: " $R | sed -n 2p)" = "$(cat $O5/line)" ]'
+: > $O5/odd; echo "16 0" > $O5/dens; o5rep
+check "  O-5: 꼴이 다른 칸(명령 글자·이름이 섞인 값)은 버리고, 숫자가 아닌 밀도 속성은 '없음'" '[ "$(cat $O5/line)" = "- 화면: 160dpi app=1280x672, 밀도 속성 없음, fb0 1920,1440" ] && ! grep -q -e 홍길동 -e "(id)" $R'
+rm -f $O5/odd; : > $O5/nodisp; rm -f $O5/sys/class/graphics/fb0/virtual_size $O5/dens; o5rep
+check "  O-5: dumpsys가 아무 줄도 안 내고 fb0·밀도 속성이 없으면 '읽지 못함·없음·없음'" '[ "$(cat $O5/line)" = "- 화면: 읽지 못함, 밀도 속성 없음, fb0 없음" ]'
+rm -f $O5/nodisp; : > $O5/err; o5rep
+check "  O-5 리뷰 낮음 4: dumpsys가 오류 글자만 내고 실패해도 '읽지 못함'으로 적고 그 글자는 리포트에 없음" '[ "$(cat $O5/line)" = "- 화면: 읽지 못함, 밀도 속성 없음, fb0 없음" ] && ! grep -q "find service" $R'
+rm -rf $O5
+HMGLOG=$T/hlm STATUS=$STF BB=$T/bin/bb APP=$T/app SRC=$T/softap.conf W=$T/w sh $T/st.sh >/dev/null
 echo DN822HEV.KOR.0000.V039.001.260902 > $T/product
 mkdir -p $T/hl9; printf '%s\n' "01-01 18:30:04.740 I/HMG-API (  148): hook map: probed for Hyundai Sonata Hybrid (DN8) (kor 260902), hooks on" > $T/hl9/log.log
 HMGLOG=$T/hl9 STATUS=$STF BB=$T/bin/bb APP=$T/app SRC=$T/softap.conf W=$T/w sh $T/st.sh >/dev/null
@@ -2396,6 +2827,9 @@ printf 'pct=100\nstate=reboot\nstage=x\nt=1\nboot=boot-T\n' > $T/lwprog; echo 99
 rm -f $T/uptime; c0=$(rbn)
 LW --watch & W5=$!
 check "  재리뷰: 부팅 뒤 초를 못 읽으면 감시자는 끝나고 reboot을 부르지 않음(요청 파일 그대로)" 'wdone $W5 3 && [ "$(rbn)" = $c0 ] && [ -f $T/reboot.req ]'
+# 1.7.4 B-7 리뷰 반영: 부팅 뒤 초를 못 읽으면 끝 시각(999)이 숫자여도 새 감시자를 띄우지 않음(끝없이 띄우지 않음)
+/bin/sleep 1; W5N=$(ps ax | grep -v grep | grep -c "$T/app2/bin/status.sh --watch")
+check "  1.7.4 B-7 리뷰: 부팅 뒤 초를 못 읽으면 끝나는 감시자가 새 감시자를 띄우지 않음(남은 감시자 프로세스 0)" '[ "$W5N" = 0 ] && [ ! -f $T/w/watch.pid ]'
 upset 101; rm -f $T/w/watch.until
 # 재리뷰(낮음): 감시자 밖(--report, --wait, 보통 Launch)은 유효한 재부팅 요청 + state=reboot이어도 reboot을 부르지 않음(동작으로)
 mkrb; c0=$(rbn); LW --report >/dev/null 2>&1; (LWSYNC=1; LWPROG=$T/lwprog; LW --wait >/dev/null 2>&1); (LWSYNC=1; LW >/dev/null 2>&1); /bin/sleep 1
@@ -2412,6 +2846,17 @@ check "  끝나는 시각을 읽지 못하면(숫자 아님) 바로 끝남(잠�
 rm -f $T/w/watch.until
 LW --watch & W3=$!
 check "  끝나는 시각 파일이 없어도 바로 끝남" 'wdone $W3 3'
+# 1.7.4 B-7: 감시자가 끝내기로 정한 뒤 잠금을 풀기 전에 Launch가 끝 시각을 늘린 경우(그 Launch는 감시자가 살아 있다고 보고 새로
+# 띄우지 않음). 잠금을 지우는 rm을 가짜로 바꿔 바로 그 순간에 끝 시각을 늘린다. 잠금을 푼 감시자가 새 감시자를 띄워야 한다
+printf '#!/bin/sh\ncase "$*" in *watch.lock*) [ -f %s/b7mark ] && { /bin/rm -f %s/b7mark; echo 200 > %s/w/watch.until.tmp; /bin/mv -f %s/w/watch.until.tmp %s/w/watch.until; } ;; esac\nexec /bin/rm "$@"\n' $T $T $T $T $T > $T/bin/rm; chmod +x $T/bin/rm
+upset 100; rm -rf $T/w/watch.lock; rm -f $T/w/watch.pid; echo 100 > $T/w/watch.until; : > $T/b7mark
+LW --watch & W7=$!; wdone $W7 5; W7R=$?; /bin/rm -f $T/bin/rm
+i=0; while ! { [ -f $T/w/watch.pid ] && kill -0 "$(cut -d" " -f1 $T/w/watch.pid)" 2>/dev/null; } && [ $i -lt 50 ]; do /bin/sleep 0.1; i=$((i+1)); done
+W7N=$(cut -d" " -f1 $T/w/watch.pid 2>/dev/null)
+check "1.7.4 B-7: 감시자가 끝나는 틈에 Launch가 끝 시각을 늘렸으면 잠금을 푼 뒤 새 감시자를 띄움(10분 동안 버튼이 듣지 않는 일 없음)" '[ $W7R = 0 ] && [ ! -f $T/b7mark ] && [ -n "$W7N" ] && [ "$W7N" != "$W7" ] && kill -0 $W7N 2>/dev/null && [ -d $T/w/watch.lock ]'
+upset 200; i=0; while [ -n "$W7N" ] && kill -0 $W7N 2>/dev/null && [ $i -lt 50 ]; do /bin/sleep 0.1; i=$((i+1)); done
+check "  B-7: 새 감시자도 늘어난 끝 시각에 끝남(잠금·pid 풂), 다시 띄우지 않음" '! kill -0 $W7N 2>/dev/null && [ ! -d $T/w/watch.lock ] && [ ! -f $T/w/watch.pid ]'
+upset 100; rm -f $T/w/watch.until
 # 서비스 점검이 띄우는 --report(감시자 없음)
 c0=$(crn); rm -f $RPROG; mkreq boot-OLD; LW --report >/dev/null 2>&1
 check "1.7.3 R-7: 이전 부팅의 요청은 버림(만들지 않음, 요청 파일은 지움)" '[ "$(crn)" = $c0 ] && [ ! -f $RPROG ] && [ ! -f $T/report.req ]'
@@ -2540,7 +2985,7 @@ rm -f $T/pn.notice; pn 1 > $T/pn.out
 check "1.7.3 U-5: P_ON=1이면 pnotice는 알림을 쓰지 않고 ap.log에만 '안내(진행 기록에 남김)'" '[ ! -s $T/pn.notice ] && grep -q "안내(진행 기록에 남김): 무선 카플레이 설정을 마쳤습니다" $T/pn.out'
 pn 0 > $T/pn.out
 check "  P_ON=0(진행 기록을 쓰지 않는 경로)이면 알림으로 남김(앞의 'Korea Projection: '은 뗌)" 'grep -q " boot-T 무선 카플레이 설정을 마쳤습니다. 내비를 재부팅해 주세요.$" $T/pn.notice'
-check "  설정 끝 재부팅 안내·새 판 안내·wireless.projection 안내·모드 새 판 실패 안내·(1.7.3) Wi-Fi 부품·칩 안내는 pnotice로(판정 줄과 겹치는 것만)" '[ "$(grep -c "^ *pnotice \"" $PKG/svc/hotspot.sh)" = 6 ]'
+check "  설정 끝 재부팅 안내·새 판 안내·wireless.projection 안내·모드 새 판 실패 안내·(1.7.3) Wi-Fi 부품·칩 안내는 pnotice로(판정 줄과 겹치는 것만), 1.7.4 P-2: 확인 중인데 지도 확인이 통과한 경우의 확인 중 안내, P-4 리뷰 낮음 1: 칩을 다시 깨우지 않는 차의 이유 안내 하나씩 더" '[ "$(grep -c "^ *pnotice \"" $PKG/svc/hotspot.sh)" = 8 ]'
 # 2026-11-10(리뷰 반영 중 PC 시험에서 찾음): 받지 않는 요청을 지울 때 req_peek이 읽은 그 내용만 지운다. 파일을 다시 보고 지우면
 # req_peek이 읽은 뒤(파일 없음) 막 들어온 새 요청을 지운다(감시자가 정상 요청을 "새 요청 아님"으로 버린 실패를 진단으로 확인)
 rd() { (PATH=$T/bin:/usr/bin:/bin:/sbin HOTSPOT_LIB=1 BB=$T/bin/bb W=$T/w sh -c '. '$T'/app/svc/hotspot.sh; '"$1"); }
@@ -2614,6 +3059,14 @@ cp $T/ps $T/ps.vr 2>/dev/null; [ -f $T/feat ] && FEATVR=1 || FEATVR=0
 touch $T/feat; echo "$VPS" > $T/ps; rm -f $VR/prog
 VPN=$PROCNET; vr; VPN=
 check "1.7.3 K-5: 준비된 니로(연결 1대) → verdict=connected, 수준 0, 리포트 '## 판정' 줄이 상태 파일과 같음, 요약 3줄" '[ "$(vkey verdict)" = connected ] && [ "$(vkey verdict_lv)" = 0 ] && vsame && [ "$(vkey s1)" = "설치: 끝남" ] && [ "$(vkey s2)" = "무선 Wi-Fi: 켜짐" ] && [ "$(vkey s3)" = "폰 연결: 카플레이 1대 연결됨" ]'
+# 1.7.4(P-4): 진행 기록의 이유 문장으로 판정 코드(QR verdict)를 가름. 다른 실패 문장은 예전처럼 failed
+for p4 in "mapfail|2|$P4MAP" "nomap|2|$P4NOMAP" "wifigone|2|$P4GONE" "failed|2|무선 모드를 넣지 못했습니다. USB를 꽂고 Launch 화면의 [제보 파일 만들기]를 눌러 보내 주세요."; do
+  p4c=${p4%%|*}; p4r=${p4#*|}; p4l=${p4r%%|*}; p4m=${p4r#*|}
+  printf 'pct=100\nstate=fail\nstage=%s\nt=1\nboot=boot-T\n' "$p4m" > $VR/prog; vr
+  echo "$p4c $(vkey verdict) $(vkey verdict_lv) $( [ "$(vkey verdict_msg)" = "$p4m" ] && echo same) $(vkey s1)" >> $T/p4v
+done; rm -f $VR/prog
+check "1.7.4 P-4: 진행 기록 문구로 판정 코드 mapfail(2)·nomap(2)·wifigone(2, 리뷰: 재부팅으로 안 바뀔 수 있어 문제·요약에 재부팅 필요 안 씀)·그 밖은 failed(2), 판정 문구는 진행 기록 그대로" '[ "$(sed -n 1p $T/p4v)" = "mapfail mapfail 2 same 설치: 안 됨(위 안내를 보세요)" ] && [ "$(sed -n 2p $T/p4v)" = "nomap nomap 2 same 설치: 안 됨(위 안내를 보세요)" ] && [ "$(sed -n 3p $T/p4v)" = "wifigone wifigone 2 same 설치: 안 됨(위 안내를 보세요)" ] && [ "$(sed -n 4p $T/p4v)" = "failed failed 2 same 설치: 안 됨(위 안내를 보세요)" ]'
+rm -f $T/p4v
 # wlan0이 없는 네 가지(설치 중·Wi-Fi 꺼짐·부품 없음·칩 실패)는 각각 다른 문구(로드맵 완료 기준)
 : > $T/ps; printf 'pct=40\nstate=run\nstage=x\nt=1\nboot=boot-T\n' > $VR/prog; vr; m1=$(vkey verdict_msg); c1=$(vkey verdict)
 rm -f $VR/prog; cat $T/bootid > $VR/w/nowlan; vr; m2=$(vkey verdict_msg); c2=$(vkey verdict); rm -f $VR/w/nowlan
@@ -2621,12 +3074,37 @@ rm -f $VR/prog; cat $T/bootid > $VR/w/nowlan; vr; m2=$(vkey verdict_msg); c2=$(v
 mv $VR/mod/mod.json $VR/mod.json.keep
 : > $VR/bk/wifi.nopart; vr; m3=$(vkey verdict_msg); c3=$(vkey verdict); e3=$(vkey verdict_end); rm -f $VR/bk/wifi.nopart
 : > $VR/bk/wifi.nochip; vr; m4=$(vkey verdict_msg); c4=$(vkey verdict); e4=$(vkey verdict_end); s24=$(vkey s2); rm -f $VR/bk/wifi.nochip
+# 1.7.4(묶음 C 리뷰 중간 2): 1.7.2에서 바로 올린 칩 실패 상태(wifi.wake 없음)는 상태 화면 한 줄·리포트 한 줄, 1.7.3이 만든 것(wifi.wake 있음)은 없음.
+# 근거가 module_version 3인 1.7.2 차도 부품 없음으로 옮기지 않고 칩 실패 + 이 한 줄(L-2a 뒤 동작)
+: > $VR/bk/wifi.nochip; : > $VR/bk/wifi.woke; echo "판정 근거: 순정 module_version=3" > $VR/bk/nochip-wifi.txt; vr; lc1=$(vkey verdict); lf1=$(vkey first); lr1=$(grep "^- 옛 판(1.7.2 이하) Wi-Fi 기록이 남음:" $T/usb0/KoreaProjection-report/1-report.md)
+echo "3 boot-T" > $VR/bk/wifi.wake; vr; lc2=$(vkey verdict); lf2=$(vkey first); lr2=$(grep "^- 옛 판(1.7.2 이하) Wi-Fi 기록이 남음:" $T/usb0/KoreaProjection-report/1-report.md); rm -f $VR/bk/wifi.nochip $VR/bk/wifi.woke $VR/bk/wifi.wake $VR/bk/nochip-wifi.txt
 mv $VR/mod.json.keep $VR/mod/mod.json
-check "1.7.3 G-1·W: wlan0 없는 네 가지가 각각 다른 판정·문구(설치 중 / Wi-Fi 켜는 중 / 부품 없음 / 칩 실패)" '[ "$c1 $c2 $c3 $c4" = "installing wifioff nopart nochip" ] && [ "$m1" = "설치 중입니다. 끝날 때까지 기다려 주세요." ] && [ "$m2" = "Wi-Fi를 켜는 중입니다(재부팅 뒤 한 번 더 확인). 내비를 재부팅해 주세요. (확인 1/3)" ] && [ "$m3" = "이 차의 내비에는 Wi-Fi 부품이 없어 무선 카플레이를 쓸 수 없습니다. USB Wi-Fi 동글로 쓰는 방법을 준비하고 있습니다." ] && [ "$m4" = "이 차는 Wi-Fi 칩이 켜지지 않아 지원하기 어렵습니다. USB Wi-Fi 동글로 쓰는 방법을 준비하고 있습니다." ]'
+check "1.7.4 C 리뷰: 옛 판(1.7.2 이하) 칩 실패 기록이 남은 차(wifi.wake 없음, 근거 3이어도)는 칩 실패 판정 + 화면 '구 버전의 기록이 남은 차입니다. 삭제 → 재부팅 → 다시 설치해 주세요.' + 리포트 '예'" '[ "$lc1" = nochip ] && [ "$lf1" = "구 버전의 기록이 남은 차입니다. 삭제 → 재부팅 → 다시 설치해 주세요." ] && [ "$lr1" = "- 옛 판(1.7.2 이하) Wi-Fi 기록이 남음: 예" ]'
+# 1.7.4(B-8 ②): 고정 표시. 판 번호가 든 mod.pin(1.7.4 USB) → 그 판, 빈 mod.pin(1.7.3 USB, 2.4.0 고정) → 판 모름, 없으면 없음.
+# 리뷰 반영: 고정 판과 지금 모드 판이 다르면 "(지금 …)"을 덧붙이고, 글자·CR·여러 줄인 mod.pin은 판 모름
+# (이 판정 시험 준비는 HMGDATA를 넘기지 않아 지금 모드 판을 모른다: 이 시험만 2.4.2 모드가 있는 HMGDATA로 돈다)
+mkdir -p $VR/hdp/mods/wireless-carplay-aa; echo '{"id": "wireless-carplay-aa", "version": "2.4.2", "system": [{"region": "KOR"}]}' > $VR/hdp/mods/wireless-carplay-aa/mod.json
+vrp() { (HMGDATA=$VR/hdp; export HMGDATA; vr); }
+MV0=2.4.2
+echo "$MV0" > $VR/bk/mod.pin; vrp; pk1=$(vkey mod_pin); pr1=$(grep "^- 무선 모드 고정:" $T/usb0/KoreaProjection-report/1-report.md)
+: > $VR/bk/mod.pin; vrp; pk2=$(vkey mod_pin); pr2=$(grep "^- 무선 모드 고정:" $T/usb0/KoreaProjection-report/1-report.md)
+rm -f $VR/bk/mod.pin; vrp; pk3=$(vkey mod_pin); pr3=$(grep "^- 무선 모드 고정:" $T/usb0/KoreaProjection-report/1-report.md)
+echo 2.4.1 > $VR/bk/mod.pin; vrp; pk4=$(vkey mod_pin); pr4=$(grep "^- 무선 모드 고정:" $T/usb0/KoreaProjection-report/1-report.md)
+printf '2.4.1x\n' > $VR/bk/mod.pin; vrp; pk5=$(vkey mod_pin); printf '2.4.1\r\n' > $VR/bk/mod.pin; vrp; pk6=$(vkey mod_pin); printf '2.4.1\n2.4.0\n' > $VR/bk/mod.pin; vrp; pk7=$(vkey mod_pin); rm -f $VR/bk/mod.pin; rm -rf $VR/hdp
+check "1.7.4 B-8 ②: 상태 파일 mod_pin·리포트 '무선 모드 고정' — 판 번호 / 판 모름(빈 옛 파일) / 없음" '[ "$pk1|$pr1" = "$MV0|- 무선 모드 고정: $MV0" ] && [ "$pk2|$pr2" = "old|- 무선 모드 고정: 고정됨(판 모름)" ] && [ "$pk3|$pr3" = "|- 무선 모드 고정: 없음" ]'
+check "  B-8 ② 리뷰: 고정 판(2.4.1)과 지금 모드 판(2.4.2)이 다르면 리포트에 '(지금 2.4.2)', 상태 키는 그대로" '[ "$pk4|$pr4" = "2.4.1|- 무선 모드 고정: 2.4.1 (지금 2.4.2)" ]'
+check "  B-8 ② 리뷰: 글자가 섞이거나(2.4.1x) CR 줄끝이거나 여러 줄인 mod.pin은 판 모름(old)" '[ "$pk5 $pk6 $pk7" = "old old old" ]'
+# 리뷰 반영: 다른 "먼저 할 일"(G-4 내비 업데이트 먼저)이 있으면 옛 기록 줄로 덮지 않음(리포트 줄은 늘 적음)
+cp $T/ps $T/ps.l3keep 2>/dev/null; cp $VR/dns.pid $VR/dns.l3keep 2>/dev/null
+: > $T/ps; rm -f $VR/dns.pid; : > $VR/bk/wifi.nochip; echo DEPEHEV.KOR.0000.V039.001.260601 > $T/product; vr; lf3=$(vkey first); lr3=$(grep "^- 옛 판(1.7.2 이하) Wi-Fi 기록이 남음:" $T/usb0/KoreaProjection-report/1-report.md); rm -f $T/product $VR/bk/wifi.nochip
+[ -f $T/ps.l3keep ] && mv $T/ps.l3keep $T/ps; [ -f $VR/dns.l3keep ] && mv $VR/dns.l3keep $VR/dns.pid
+check "  C 리뷰 반영: 다른 먼저 할 일(내비 업데이트)이 있으면 옛 기록 줄로 덮지 않고, 리포트 줄은 '예'" 'case "$lf3" in "먼저 할 일: 내비 버전이 확인된 차"*) true ;; *) false ;; esac && [ "$lr3" = "- 옛 판(1.7.2 이하) Wi-Fi 기록이 남음: 예" ]'
+check "  C 리뷰: 1.7.3이 만든 칩 실패(wifi.wake 있음)에서는 그 줄이 없고 리포트는 '아니요'" '[ "$lc2" = nochip ] && [ -z "$lf2" ] && [ "$lr2" = "- 옛 판(1.7.2 이하) Wi-Fi 기록이 남음: 아니요" ]'
+check "1.7.3 G-1·W: wlan0 없는 네 가지가 각각 다른 판정·문구(설치 중 / Wi-Fi 켜는 중 / 부품 없음 / 칩 실패)" '[ "$c1 $c2 $c3 $c4" = "installing wifioff nopart nochip" ] && [ "$m1" = "설치 중입니다. 끝날 때까지 기다려 주세요." ] && [ "$m2" = "Wi-Fi를 켜는 중입니다(재부팅 뒤 한 번 더 확인). 내비를 3분 후 재부팅해 주세요. (확인 1/3)" ] && [ "$m3" = "이 차의 내비에는 Wi-Fi 부품이 없어 무선 카플레이를 쓸 수 없습니다. USB Wi-Fi 동글로 쓰는 방법을 준비하고 있습니다." ] && [ "$m4" = "이 차는 Wi-Fi 칩이 켜지지 않아 지원하기 어렵습니다. USB Wi-Fi 동글로 쓰는 방법을 준비하고 있습니다." ]'
 check "  부품 없음·칩 실패는 '안 됨'으로 끝남(verdict_end=yes: 앱이 지우는 법 한 줄을 보임, U-6), 요약 Wi-Fi 줄" '[ "$e3 $e4" = "yes yes" ] && [ "$s24" = "무선 Wi-Fi: 칩이 켜지지 않음" ]'
 # G-1·W-4: 설치에서 칩 깨우기 확인 중(모드 아직 없음)
 rm -f $VR/mod/mod.json; echo "1 boot-T" > $VR/bk/wifi.wake; vr
-check "1.7.3 G-1: 칩 깨우기 확인 중(모드 없음, 깨우기 1번째) → wificheck, 문구에 확인 횟수(1/3), 요약 '설치: 재부팅 필요'" '[ "$(vkey verdict)" = wificheck ] && [ "$(vkey verdict_msg)" = "Wi-Fi를 켜는 중입니다(재부팅 뒤 한 번 더 확인). 내비를 재부팅해 주세요. (확인 1/3)" ] && [ "$(vkey s1)" = "설치: 재부팅 필요" ] && vsame'
+check "1.7.3 G-1: 칩 깨우기 확인 중(모드 없음, 깨우기 1번째) → wificheck, 문구에 확인 횟수(1/3), 요약 '설치: 재부팅 필요'" '[ "$(vkey verdict)" = wificheck ] && [ "$(vkey verdict_msg)" = "Wi-Fi를 켜는 중입니다(재부팅 뒤 한 번 더 확인). 내비를 3분 후 재부팅해 주세요. (확인 1/3)" ] && [ "$(vkey s1)" = "설치: 재부팅 필요" ] && vsame'
 : > $VR/bk/wifi.woke; vr; c_woke=$(vkey verdict); rm -f $VR/bk/wifi.woke
 echo "3 boot-T" > $VR/bk/wifi.wake; vr; c_used=$(vkey verdict); echo "1 boot-T" > $VR/bk/wifi.wake
 : > $VR/bk/mod.tried; vr; c_tried=$(vkey verdict)
@@ -2638,7 +3116,7 @@ check "  기록이 없으면 '넣지 못했습니다'(제보 안내)" '[ "$(vkey
 echo '{"id":"wireless-carplay-aa"}' > $VR/mod/mod.json
 # U-8: 재부팅 필요 → 남은 횟수
 echo "$VPS" > $T/ps; printf 'pct=100\nstate=reboot\nstage=무선 카플레이 설정을 마쳤습니다. 내비를 재부팅해 주세요(RESET 버튼 또는 NEMESIS 재부팅).\nt=1\nboot=boot-T\n' > $VR/prog; vr
-check "1.7.3 U-8: 재부팅 필요면 진행 기록의 첫 문장 + '내비를 재부팅해 주세요(재부팅 1번이면 끝납니다).'(재리뷰 L-5: 두 문장)" '[ "$(vkey verdict)" = reboot ] && [ "$(vkey verdict_msg)" = "무선 카플레이 설정을 마쳤습니다. 내비를 재부팅해 주세요(재부팅 1번이면 끝납니다)." ]'
+check "1.7.3 U-8·1.7.4 소유자 문구: 재부팅 필요면 진행 기록 문장을 붙이지 않고 '내비를 3분 후 재부팅해 주세요.' 한 문장" '[ "$(vkey verdict)" = reboot ] && [ "$(vkey verdict_msg)" = "내비를 3분 후 재부팅해 주세요." ]'
 # H-1: HMG-API 적용 거절(계획 problem 줄) → 안내와 리포트의 문제 줄(숫자·경로만)
 printf 'pct=100\nstate=fail\nstage=x\nt=1\nboot=boot-T\n' > $VR/prog; printf '%s\n' "nothing changed: 1 problem(s)" "problem  /system/etc/permissions/com.hkmc.software.connectivity.carplay_wireless.xml [wireless-carplay-aa] already on the head unit, but 홍길동 add it" > $VR/w/plan.txt
 echo "boot-T 20" > $VR/w/svc.start; touch -t 202601010000 $VR/w/svc.start; vr
@@ -2667,7 +3145,7 @@ rm -rf $VR/proc/888 $VR/proc/1 $VR/pn; echo "777 boot-T" > $VR/dns.pid
 : > $T/ps; cat $T/bootid > $VR/w/nowlan; echo "2 boot-T" > $VR/bk/nowlan.boots; vr
 check "1.7.3 리뷰 M-3: wlan0이 2번째 부팅까지 안 생기면 '확인 중(확인 2/3)'" '[ "$(vkey verdict)" = wifioff ] && grep -q "^verdict_msg=Wi-Fi를 켜는 중입니다.*(확인 2/3)$" $STF'
 echo "3 boot-T" > $VR/bk/nowlan.boots; vr
-check "  재리뷰 중간 3②: 3번째 부팅에도 안 생기지만 칩 실패 근거가 없으면 제보 부탁(수준 2, 지우는 법 없음)" '[ "$(vkey verdict)" = nowlanrepeat ] && grep -qx "verdict_msg=Wi-Fi 장치가 계속 켜지지 않습니다. 재부팅해도 같으면 USB를 꽂고 \[제보 파일 만들기\]로 알려 주세요." $STF && grep -qx "verdict_end=no" $STF && [ "$(vkey verdict_lv)" = 2 ]'
+check "  재리뷰 중간 3②: 3번째 부팅에도 안 생기지만 칩 실패 근거가 없으면 제보 부탁(수준 2, 지우는 법 없음)" '[ "$(vkey verdict)" = nowlanrepeat ] && grep -qx "verdict_msg=Wi-Fi 장치가 계속 켜지지 않습니다. 3분 후 재부팅해도 같으면 USB를 꽂고 \[제보 파일 만들기\]로 알려 주세요." $STF && grep -qx "verdict_end=no" $STF && [ "$(vkey verdict_lv)" = 2 ]'
 echo "[  12.3] bcmsdh_sdmmc: si_attach failed!" > $VR/bk/nochip-wifi.txt; vr; vrep_l5=$(grep "^- Wi-Fi 부품 없음 기록" $T/usb0/KoreaProjection-report/1-report.md); rm -f $VR/bk/nochip-wifi.txt
 check "  근거(커널 칩 실패 줄 si_attach failed)가 있으면 칩 실패(W-2·W-6 문구, 안 됨으로 끝남)" '[ "$(vkey verdict)" = nowlanfail ] && grep -q "^verdict_msg=이 차는 Wi-Fi 칩이 켜지지 않아" $STF && grep -qx "verdict_end=yes" $STF'
 echo 3 > $VR/bk/wifi.modver; vr; rm -f $VR/bk/wifi.modver
@@ -2678,20 +3156,20 @@ check "  리뷰 L-5: 리포트에 부품 없음·깨우기 횟수·module_versio
 rm -f $VR/w/nowlan $VR/bk/nowlan.boots; echo "$VPS" > $T/ps
 # 리뷰 L-6: 무선 안드로이드 오토만 연결돼도 연결로 봄
 printf 'boot=boot-T\naa=ok\naa_t=1\n' > $VR/hint; mkdir -p $VR/pn; : > $VR/pn/tcp; : > $VR/pn/tcp6; : > $VR/pn/if_inet6; VPN=$VR/pn; vr
-check "1.7.3 리뷰 L-6·베타 1: 카플레이 연결 없이 무선 AA만 연결(이번 부팅 aa=ok)이면 connected '무선 안드로이드 오토 연결됨, 카플레이 준비됨', 요약 줄도" '[ "$(vkey verdict)" = connected ] && grep -qx "verdict_msg=무선 안드로이드 오토 연결됨, 카플레이 준비됨" $STF && grep -qx "s3=폰 연결: 무선 안드로이드 오토 연결됨" $STF'
+check "1.7.3 리뷰 L-6·베타 1: 카플레이 연결 없이 무선 AA만 연결(이번 부팅 aa=ok)이면 connected '무선 안드로이드 오토 연결됨, 카플레이 준비됨', 요약 줄도" '[ "$(vkey verdict)" = connected ] && grep -qx "verdict_msg=무선 안드로이드 오토 연결됨, 카플레이 준비됨" $STF && grep -qx "s3=폰 연결: 안드로이드 오토 연결됨" $STF'
 printf 'boot=boot-OLD\naa=ok\naa_t=1\n' > $VR/hint; vr
 check "  지난 부팅의 aa=ok는 연결로 보지 않음" '[ "$(vkey verdict)" != connected ]'
 VPN=; rm -rf $VR/pn $VR/hint
 # 베타 1(소유자 요청): 카플레이와 무선 안드로이드 오토를 한 줄로. 상태 파일·리포트 판정 줄이 같은 문구
 RV=$T/usb0/KoreaProjection-report/1-report.md
 rm -f $VR/aaoff; printf 'boot=boot-T\naa_ready=1700000000\naa=\naa_t=\n' > $VR/hint; vr
-check "베타 1: 준비됨 + AA 신호 켜짐 → '무선 카플레이·안드로이드 오토 준비됨…' 한 줄, 리포트 판정 줄도 같은 문구" '[ "$(vkey verdict)" = ready ] && grep -qx "verdict_msg=무선 카플레이·안드로이드 오토 준비됨. 아이폰은 설정 → 일반 → CarPlay, 안드로이드는 블루투스 연결 뒤 '"'"'무선 Android Auto 사용'"'"'을 누르세요." $STF && grep -q "^- 판정: ready (수준 0) 무선 카플레이·안드로이드 오토 준비됨. 아이폰은" $RV'
+check "베타 1: 준비됨 + AA 신호 켜짐 → '무선 카플레이·안드로이드 오토 준비됨…' 한 줄, 리포트 판정 줄도 같은 문구" '[ "$(vkey verdict)" = ready ] && grep -qx "verdict_msg=무선 카플레이·안드로이드 오토 준비됨." $STF && grep -qx -- "- 판정: ready (수준 0) 무선 카플레이·안드로이드 오토 준비됨." $RV'
 rm -f $VR/hint; vr
-check "  베타 1: AA를 켠 차인데 신호가 아직(aa_ready 없음) → '무선 카플레이 준비됨(안드로이드 오토는 준비 중)'" '[ "$(vkey verdict)" = ready ] && grep -q "^verdict_msg=무선 카플레이 준비됨(안드로이드 오토는 준비 중). 아이폰은" $STF'
+check "  베타 1: AA를 켠 차인데 신호가 아직(aa_ready 없음) → '무선 카플레이 준비됨(안드로이드 오토는 준비 중)'" '[ "$(vkey verdict)" = ready ] && grep -qx "verdict_msg=무선 카플레이 준비됨(안드로이드 오토는 준비 중)." $STF'
 printf 'boot=boot-T\naa_ready=1700000000\naa=\naa_t=\n' > $VR/hint; : > $VR/aaoff; vr
-check "  베타 1: AA를 끈 차는 신호 기록이 남아도 '무선 카플레이 준비됨'만" '[ "$(vkey verdict)" = ready ] && grep -q "^verdict_msg=무선 카플레이 준비됨. 아이폰은 설정 → 일반 → CarPlay에서 연결하세요.$" $STF'
+check "  1.7.4 L-9: 끄기 표시(aa-off)가 남아 있어도 신호 기록이 있으면 '무선 카플레이·안드로이드 오토 준비됨.'" '[ "$(vkey verdict)" = ready ] && grep -qx "verdict_msg=무선 카플레이·안드로이드 오토 준비됨." $STF'
 VPN=$PROCNET; vr
-check "  베타 1: AA를 끈 차에 카플레이 연결 → '무선 카플레이 연결됨'" '[ "$(vkey verdict)" = connected ] && grep -qx "verdict_msg=무선 카플레이 연결됨" $STF'
+check "  1.7.4 L-9: 끄기 표시가 남아 있어도 카플레이 연결 + 신호 → '무선 카플레이 연결됨, 안드로이드 오토 준비됨'" '[ "$(vkey verdict)" = connected ] && grep -qx "verdict_msg=무선 카플레이 연결됨, 안드로이드 오토 준비됨" $STF'
 rm -f $VR/aaoff; vr
 check "  베타 1: 카플레이 연결 + AA 신호 켜짐 → '무선 카플레이 연결됨, 안드로이드 오토 준비됨', 리포트 판정 줄도" '[ "$(vkey verdict)" = connected ] && grep -qx "verdict_msg=무선 카플레이 연결됨, 안드로이드 오토 준비됨" $STF && grep -q "^- 판정: connected (수준 0) 무선 카플레이 연결됨, 안드로이드 오토 준비됨$" $RV'
 printf 'boot=boot-T\naa_ready=1700000000\naa=ok\naa_t=1\n' > $VR/hint; vr
@@ -2701,22 +3179,61 @@ check "  베타 1: 지난 부팅의 AA 신호 기록은 준비됨으로 보지 �
 VPN=; rm -f $VR/hint $VR/aaoff
 # 베타 1 리뷰 4·5
 printf 'boot=boot-T\naa_ready=1700000000\naa=ok\naa_t=1\n' > $VR/hint; : > $VR/aaoff; vr
-check "베타 1 리뷰 4: AA를 끈 차에 aa=ok가 남아 있어도 AA 연결로 보지 않음(카플레이 준비됨)" '[ "$(vkey verdict)" = ready ] && grep -qx "verdict_msg=무선 카플레이 준비됨. 아이폰은 설정 → 일반 → CarPlay에서 연결하세요." $STF'
+check "1.7.4 L-9: 끄기 표시가 남아 있어도 우리 hostapd + aa=ok면 AA 연결로 봄(카플레이 준비됨만이 아님)" '[ "$(vkey verdict)" = connected ] && ! grep -qx "verdict_msg=무선 카플레이 준비됨." $STF'
 rm -f $VR/aaoff; printf 'boot=boot-T\naa_ready=1700000000\naa=cpwait\naa_t=1\n' > $VR/hint; VPN=$PROCNET; vr; VPN=
 check "베타 1 리뷰 5: 카플레이 연결 중 AA가 기다리는 중(aa=cpwait)이면 'AA 준비됨'이라 하지 않고 '무선 카플레이 연결됨'만" '[ "$(vkey verdict)" = connected ] && grep -qx "verdict_msg=무선 카플레이 연결됨" $STF'
-check "  베타 1 리뷰 4: AA만 연결일 때 '카플레이 준비됨'은 우리 핫스팟이 켜져 있을 때만(소스)" 'grep -q "elif \[ \"\$K_OURAP\" = yes \]; then _vs connected 0 \"무선 안드로이드 오토 연결됨, 카플레이 준비됨\"" $PKG/bin/status.sh && grep -q "else _vs connected 0 \"무선 안드로이드 오토 연결됨\"; fi" $PKG/bin/status.sh'
+# 1.7.4(B-15 뒤 리뷰): 무선 AA 연결은 우리 hostapd가 돌 때만 연결로 본다. AA만 연결 문구는 소유자 문구 한 가지("…, 카플레이 준비됨")
+# ① 우리 hostapd 없음 + 남은 aa=ok → 연결 아님(apoff, "지금 연결된 폰 없음") ② hostapd 있음 + aa=ok → connected ③ 확인 안 된 차종 + hostapd 없음 + aa=ok → newconnected 아님
+cp $T/ps $T/ps.b15 2>/dev/null; cp $VR/dns.pid $VR/dns.b15 2>/dev/null; mkdir -p $VR/pn; : > $VR/pn/tcp; : > $VR/pn/tcp6; : > $VR/pn/if_inet6; VPN=$VR/pn
+printf 'boot=boot-T\naa=ok\naa_t=1\n' > $VR/hint; : > $T/ps; rm -f $VR/dns.pid; vr; o1v=$(vkey verdict); o1s=$(vkey s3)
+echo "$VPS" > $T/ps; echo "777 boot-T" > $VR/dns.pid; vr; o2v=$(vkey verdict); o2m=$(vkey verdict_msg); o2s=$(vkey s3)
+: > $T/ps; rm -f $VR/dns.pid; echo TESTX.KOR.0000.V001.001.260902 > $T/product; vr; o3v=$(vkey verdict); rm -f $T/product
+echo "$VPS" > $T/ps; echo "777 boot-T" > $VR/dns.pid; echo TESTX.KOR.0000.V001.001.260902 > $T/product; vr; o4v=$(vkey verdict); o4m=$(vkey verdict_msg); rm -f $T/product
+check "  1.7.4 B-15 리뷰 ①: 우리 hostapd가 없으면 남은 aa=ok를 연결로 보지 않음 → apoff, '폰 연결: 지금 연결된 폰 없음'(QR result: connected 없음)" '[ "$o1v" = apoff ] && [ "$o1s" = "폰 연결: 지금 연결된 폰 없음" ]'
+check "  B-15 리뷰 ②: 우리 hostapd가 돌고 aa=ok → connected '무선 안드로이드 오토 연결됨, 카플레이 준비됨', 요약 '폰 연결: 안드로이드 오토 연결됨', 홀로 쓰는 문구는 소스에 없음" '[ "$o2v" = connected ] && [ "$o2m" = "무선 안드로이드 오토 연결됨, 카플레이 준비됨" ] && [ "$o2s" = "폰 연결: 안드로이드 오토 연결됨" ] && ! grep -q "_vs connected 0 \"무선 안드로이드 오토 연결됨\"" $PKG/bin/status.sh'
+check "  B-15 리뷰 ③: 확인 안 된 차종 + hostapd 없음 + aa=ok → newconnected 아님, hostapd 있음이면 newconnected 문구" '[ "$o3v" != newconnected ] && [ "$o3v" != connected ] && [ "$o4v" = newconnected ] && [ "$o4m" = "연결됐습니다! QR로 '"'"'연결됨'"'"'을 알려 주시면 지원 목록에 올립니다." ]'
+# 1.7.4(B-15): 핫스팟이 꺼진 채 aa=ok만 남은 차는 wifioff·stockoff가 가려지지 않음(연결이 없을 때와 같은 판정)
+: > $T/ps; rm -f $VR/dns.pid
+cat $T/bootid > $VR/w/nowlan; vr; b15a=$(vkey verdict); rm -f $VR/hint; vr; b15b=$(vkey verdict); rm -f $VR/w/nowlan
+printf 'boot=boot-T\naa=ok\naa_t=1\n' > $VR/hint; : > $VR/bk/stockap.seen; vr; b15c=$(vkey verdict); rm -f $VR/hint; vr; b15d=$(vkey verdict); rm -f $VR/bk/stockap.seen
+VPN=; rm -rf $VR/pn; [ -f $T/ps.b15 ] && mv $T/ps.b15 $T/ps; [ -f $VR/dns.b15 ] && mv $VR/dns.b15 $VR/dns.pid
+check "  1.7.4 B-15: 핫스팟이 꺼진 채 aa=ok만 남아도 wifioff·stockoff가 나옴(연결이 없을 때와 같음)" '[ "$b15a $b15b $b15c $b15d" = "wifioff wifioff stockoff stockoff" ]'
+# 1.7.4(B-15 가-2): 리포트의 안내 파일 한 줄(파일 없음·다른 부팅·이번 부팅 ok)과 초까지의 만든 시각. 안내 파일의 다른 값은 옮기지 않음
+rm -f $VR/hint; vr; h15a=$(grep "^- 안내 파일:" $T/usb0/KoreaProjection-report/1-report.md)
+printf 'boot=boot-OLD\naa=ok\naa_t=1700000123\niph=wifi\n' > $VR/hint; vr; h15b=$(grep "^- 안내 파일:" $T/usb0/KoreaProjection-report/1-report.md)
+printf 'boot=boot-T\naa_ready=1700000000\naa=ok\naa_t=1700000123\niph=nocp\niph_t=1700000456\n' > $VR/hint; vr; h15c=$(grep "^- 안내 파일:" $T/usb0/KoreaProjection-report/1-report.md); rm -f $VR/hint
+check "1.7.4 B-15 가-2: 리포트 '안내 파일' 줄 — 없음 / 다른 부팅 / 이번 부팅 aa=ok·aa_ready 있음, 시각·다른 줄 값은 옮기지 않음" '[ "$h15a" = "- 안내 파일: 없음" ] && [ "$h15b" = "- 안내 파일: 부팅 일치 아니요, aa=ok, aa_ready 없음" ] && [ "$h15c" = "- 안내 파일: 부팅 일치 예, aa=ok, aa_ready 있음" ] && ! grep -q -e 1700000123 -e 1700000456 -e nocp $T/usb0/KoreaProjection-report/1-report.md'
+check "  B-15 가-2: 리포트 끝 '만든 시각'이 초까지(YYYY-MM-DD HH:MM:SS)" 'grep -q "^_만든 시각 [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9]_$" $T/usb0/KoreaProjection-report/1-report.md'
+# 리뷰 반영: aa 값이 영문 소문자가 아니면 "기타"(값 자체는 옮기지 않음), has_line은 끝 줄바꿈이 없어도 맞고 CR이 붙은 줄은 다르게 봄
+printf 'boot=boot-T\naa=OK1\n' > $VR/hint; vr; h15d=$(grep "^- 안내 파일:" $T/usb0/KoreaProjection-report/1-report.md); rm -f $VR/hint
+mkdir -p $T/hl15; printf 'boot=x\naa=ok' > $T/hl15/nonl; printf 'boot=x\r\naa=ok\r\n' > $T/hl15/crlf
+HL15=$(HOTSPOT_LIB=1 BB=$T/bin/bb sh -c '. '$T'/app/svc/hotspot.sh; for f in nonl crlf none; do has_line aa=ok '$T'/hl15/$f && echo y || echo n; done' 2>/dev/null | tr '\n' ' '); rm -rf $T/hl15
+# (has_line은 끝 줄바꿈이 없는 마지막 줄을 읽지 않는다: read가 그 줄에서 거짓. 안내 파일은 늘 줄바꿈으로 끝나고, has_line은 삭제 경로
+#  perms_seed도 쓰므로 바꾸지 않고 지금 동작을 못 박는다)
+check "  B-15 리뷰: aa 값이 영문 소문자가 아니면 '기타'(값은 옮기지 않음), has_line은 끝 줄바꿈 없는 마지막 줄·CR 줄·파일 없음 모두 아님(지금 동작)" '[ "$h15d" = "- 안내 파일: 부팅 일치 예, aa=기타, aa_ready 없음" ] && ! grep -q OK1 $T/usb0/KoreaProjection-report/1-report.md && [ "$HL15" = "n n n " ]'
+# 1.7.4(소유자 지시): 순정 Wi-Fi 차(ap_mode=stock)의 준비됨. netd(60)가 띄운 순정 hostapd(77)가 카플레이 SSID로 떠 있고 우리 hostapd는 없음.
+# ① 순정 Wi-Fi 차 → "무선 카플레이·안드로이드 오토 준비됨." ② 1.7.4(L-9): 끄기 표시(aa-off)가 남아 있어도 같음
+mkdir -p $VR/proc/60 $VR/proc/77; echo "60 (netd) S 1 60" > $VR/proc/60/stat; echo "77 (hostapd) S 60 77" > $VR/proc/77/stat
+printf 'interface=wlan0\ndriver=nl80211\nssid=%s\nchannel=149\nhw_mode=a\n' 'SSID\cX' > $VR/stockap.conf
+printf '/system/bin/hostapd\0-e\0/data/misc/wifi/entropy.bin\0%s\0' $VR/stockap.conf > $VR/proc/77/cmdline
+cp $T/ps $T/ps.stk 2>/dev/null; echo "  77 wifi      /system/bin/hostapd -e /data/misc/wifi/entropy.bin $VR/stockap.conf" > $T/ps
+rm -f $VR/aaoff; vr; sk1=$(vkey ap_mode); sv1=$(vkey verdict); sm1=$(vkey verdict_msg)
+: > $VR/aaoff; vr; sv2=$(vkey verdict); sm2=$(vkey verdict_msg); rm -f $VR/aaoff
+[ -f $T/ps.stk ] && mv $T/ps.stk $T/ps; rm -rf $VR/proc/60 $VR/proc/77 $VR/stockap.conf
+check "  1.7.4 소유자 지시: 순정 Wi-Fi 차(ap_mode=stock), AA를 끄지 않음 → ready '무선 카플레이·안드로이드 오토 준비됨.'" '[ "$sk1" = stock ] && [ "$sv1" = ready ] && [ "$sm1" = "무선 카플레이·안드로이드 오토 준비됨." ]'
+check "  1.7.4 L-9: 순정 Wi-Fi 차에 끄기 표시(aa-off)가 남아 있어도 ready '무선 카플레이·안드로이드 오토 준비됨.'" '[ "$sv2" = ready ] && [ "$sm2" = "무선 카플레이·안드로이드 오토 준비됨." ]'
 rm -f $VR/hint
 # 베타 2 #64: HMG-API 부팅 보호(boot guard). starts(올린 뒤 값) 4 이상이면 이번 부팅 훅 꺼짐. 커널 로그 줄은 보조 근거. starts를 못 읽으면 판정 안 함
 RV=$T/usb0/KoreaProjection-report/1-report.md
 # 10장 확인 리뷰 2: 훅이 켜질 수 있는 차(hook/enable 있음, HOOKDIR = starts 파일 폴더 = $VR)
 : > $VR/enable
 echo 4 > $VR/hstarts; printf '%s\n' "<6>[    3.0] hmgapi-hook: zygote, hooks off (boot guard, starts=3), hmgapid" > $VR/kdmesg; vr
-check "베타 2 #64: starts=4·커널 로그 boot guard → 판정 bootguard(수준 2), '지우지 말고 다시 설치(업데이트)' 안내, 요약 줄, QR 판정 코드" '[ "$(vkey verdict)" = bootguard ] && [ "$(vkey verdict_lv)" = 2 ] && grep -qx "verdict_msg=HMG-API가 재부팅이 너무 잦은 것으로 보고 무선 기능을 껐습니다. HMG-API를 지우지 말고 NEMESIS에서 다시 설치(업데이트)한 뒤 재부팅하고, 2분 넘게 켜 두세요." $STF && grep -qx "s1=설치: HMG-API 훅 꺼짐(부팅 보호)" $STF'
+check "베타 2 #64: starts=4·커널 로그 boot guard → 판정 bootguard(수준 2), '지우지 말고 다시 설치(업데이트)' 안내, 요약 줄, QR 판정 코드" '[ "$(vkey verdict)" = bootguard ] && [ "$(vkey verdict_lv)" = 2 ] && grep -qx "verdict_msg=HMG-API가 재부팅이 너무 잦은 것으로 보고 무선 기능을 껐습니다. HMG-API를 지우지 말고 NEMESIS에서 다시 설치(업데이트)한 뒤 재부팅하고, 3분 넘게 켜 두세요." $STF && grep -qx "s1=설치: HMG-API 훅 꺼짐(부팅 보호)" $STF'
 check "  베타 2 #64: 리포트 판정 줄과 '부팅 보호: starts=4(3 이상이면 다음 부팅 훅 꺼짐), 이번 부팅 boot guard 줄 있음', 훅 줄에 '이번 부팅 기록 없음'" 'grep -q "^- 판정: bootguard (수준 2) HMG-API가 재부팅이 너무 잦은" $RV && grep -qx "\- HMG-API 부팅 보호: starts=4(3 이상이면 다음 부팅 훅 꺼짐), 이번 부팅 boot guard 줄 있음" $RV && grep -q "^- 무선 모드 훅(마지막 부팅 기록): .*(이번 부팅 기록 없음: 이번 부팅은 부팅 보호로 훅 꺼짐)$" $RV && grep -q "^- HMG-API 훅(마지막 부팅 기록): .*(이번 부팅 기록 없음: 이번 부팅은 부팅 보호로 훅 꺼짐)$" $RV'
 echo 3 > $VR/hstarts; printf '%s\n' "<6>[    3.0] hmgapi-hook: zygote, hooks on, start 3, hmgapid" > $VR/kdmesg; vr
 check "  베타 2 #64: starts=3(훅이 켜진 3번째 시작)이면 부팅 보호 판정 아님, 훅 줄에 '이번 부팅 훅 켜짐', boot guard 줄 없음" '[ "$(vkey verdict)" != bootguard ] && grep -q "^- HMG-API 훅(마지막 부팅 기록): .*(이번 부팅 훅 켜짐)$" $RV && grep -qx "\- HMG-API 부팅 보호: starts=3(3 이상이면 다음 부팅 훅 꺼짐), 이번 부팅 boot guard 줄 없음" $RV'
 echo 2 > $VR/hstarts; printf '%s\n' "<6>[    3.0] hmgapi-hook: zygote, hooks off (boot guard, starts=5), hmgapid" > $VR/kdmesg; vr
-check "  베타 2 #64·리뷰 L1: 이번 부팅 커널 로그가 boot guard인데 starts가 4보다 작으면(그 사이 HMG-API 다시 설치) 재부팅만 안내(수준 1)" '[ "$(vkey verdict)" = bootguard ] && [ "$(vkey verdict_lv)" = 1 ] && grep -qx "verdict_msg=HMG-API를 다시 설치한 것으로 보입니다. 내비를 재부팅하고 2분 넘게 켜 두세요." $STF'
+check "  베타 2 #64·리뷰 L1: 이번 부팅 커널 로그가 boot guard인데 starts가 4보다 작으면(그 사이 HMG-API 다시 설치) 재부팅만 안내(수준 1)" '[ "$(vkey verdict)" = bootguard ] && [ "$(vkey verdict_lv)" = 1 ] && grep -qx "verdict_msg=HMG-API를 다시 설치한 것으로 보입니다. 내비를 재부팅하고 3분 넘게 켜 두세요." $STF'
 rm -f $VR/hstarts; vr
 check "  리뷰 M2: 이번 부팅 커널 로그에 boot guard 줄이 있으면 starts를 못 읽어도 부팅 보호(커널 줄을 따름), 리포트에 '읽지 못함'" '[ "$(vkey verdict)" = bootguard ] && [ "$(vkey verdict_lv)" = 2 ] && grep -q "^- HMG-API 부팅 보호: starts=읽지 못함" $RV'
 : > $VR/kdmesg; vr
@@ -2739,6 +3256,11 @@ echo 4 > $VR/hstarts
 check "  리뷰 M2: HMG-API를 지운 차(설치 기록 없음)는 남은 starts가 4 이상이어도 부팅 보호가 아니라 'HMG-API가 없습니다'" '[ "$(vkey verdict)" = nohmgapi ]'
 echo 5 > $VR/hstarts; VPN=$PROCNET; vr; VPN=
 check "  베타 2 #64: 카플레이가 연결돼 있으면 부팅 보호보다 연결 판정이 앞섬" '[ "$(vkey verdict)" = connected ]'
+# 1.7.4(B-15): AA만 연결이어도 부팅 보호보다 연결 판정이 앞섬(차에서 처음 켜지는 경로)
+cp $T/ps $T/ps.b15g 2>/dev/null; cp $VR/dns.pid $VR/dns.b15g 2>/dev/null; echo "$VPS" > $T/ps; echo "777 boot-T" > $VR/dns.pid
+mkdir -p $VR/pn; : > $VR/pn/tcp; : > $VR/pn/tcp6; : > $VR/pn/if_inet6; printf 'boot=boot-T\naa=ok\naa_t=1\n' > $VR/hint; VPN=$VR/pn; vr; b15g=$(vkey verdict); rm -f $VR/hint; vr; b15h=$(vkey verdict); VPN=; rm -rf $VR/pn
+[ -f $T/ps.b15g ] && mv $T/ps.b15g $T/ps; [ -f $VR/dns.b15g ] && mv $VR/dns.b15g $VR/dns.pid
+check "  1.7.4 B-15: 우리 hostapd가 돌고 AA만 연결이면 부팅 보호(bootguard) 대신 connected, 연결이 없으면 bootguard" '[ "$b15g $b15h" = "connected bootguard" ]'
 rm -f $VR/hstarts; : > $VR/kdmesg; vr
 check "  베타 2 #64: 커널 로그에 HMG-API 줄이 없으면 훅 줄에 '이번 부팅인지 모름'" 'grep -q "^- HMG-API 훅(마지막 부팅 기록): .*(이번 부팅인지 모름: 커널 로그에 줄 없음)$" $RV'
 rm -f $VR/hstarts $VR/kdmesg $VR/enable
@@ -2747,7 +3269,19 @@ rm -f $VR/prog $VR/w/plan.txt
 : > $T/ps; rm -f $VR/dns.pid; vr
 check "1.7.3 G-4: ✅ 차(니로 260902)인데 핫스팟 꺼짐 → '먼저 할 일: 같은 차에서 된 분이 있습니다'" '[ "$(vkey verdict)" = apoff ] && grep -q "^first=먼저 할 일: 같은 차에서 된 분이 있습니다" $STF && grep -q "^- 먼저 할 일: 같은 차에서 된 분이 있습니다" $T/usb0/KoreaProjection-report/1-report.md'
 echo DEPEHEV.KOR.0000.V039.001.260601 > $T/product; vr
-check "  내비 버전이 260902보다 옛것(260601)이면 '내비를 업데이트한 뒤 다시 설치'가 먼저" 'grep -q "^first=먼저 할 일: 내비 버전이 확인된 차(260902)보다 옛것입니다. 내비를 업데이트한 뒤 NEMESIS·HMG-API·Korea Projection을 다시 설치해 주세요." $STF'
+check "  내비 버전이 260902보다 옛것(260601)이면 '내비를 업데이트한 뒤 다시 설치'가 먼저" 'grep -q "^first=먼저 할 일: 내비 버전이 확인된 차(260902)보다 구버전입니다. 내비를 업데이트한 뒤 NEMESIS·HMG-API·Korea Projection을 다시 설치해 주세요." $STF'
+# 1.7.4 B-5: 레이 TAM22는 내비 260604에서 확인된 차. 260604면 '같은 차에서 된 분', 그보다 옛것(260301)이면 기준을 260604로 안내
+echo TAM22.KOR.0000.V038.001.260604 > $T/product; vr
+check "1.7.4 B-5: 레이 TAM22 260604는 확인된 차(CARS_SEEN), 문제가 있으면 '같은 차에서 된 분'(260902보다 옛것이라고 하지 않음)" 'grep -q "^first=먼저 할 일: 같은 차에서 된 분이 있습니다" $STF && grep -q "^- 확인된 차: 예" $RV'
+echo TAM22.KOR.0000.V030.001.260301 > $T/product; vr
+check "  B-5: 레이 TAM22가 260604보다 옛것(260301)이면 '확인된 차(260604)보다 옛것' 안내" 'grep -q "^first=먼저 할 일: 내비 버전이 확인된 차(260604)보다 구버전입니다." $STF'
+echo DL322.KOR.0000.V039.001.260902 > $T/product; vr
+check "  B-5: K5 DL322 260902도 확인된 차" 'grep -q "^- 확인된 차: 예" $RV'
+# 묶음 G 후속: README에 새로 ✅가 된 모하비 HM21(펌웨어 가운데 칸 55W_M)도 확인된 차, 260902보다 옛것이면 업데이트 안내
+echo HM21.KOR.55W_M.V039.001.260902 > $T/product; vr
+check "  묶음 G 후속: 모하비 HM21 260902(55W_M)는 확인된 차, 문제가 있으면 '같은 차에서 된 분'" 'grep -q "^- 확인된 차: 예" $RV && grep -q "^first=먼저 할 일: 같은 차에서 된 분이 있습니다" $STF'
+echo NEEV.KOR.0000.V038.001.260604 > $T/product; vr
+check "  묶음 G 후속: 아이오닉 5 NEEV 260604는 확인된 판(260902)보다 옛것이라 업데이트 안내가 먼저" 'grep -q "^first=먼저 할 일: 내비 버전이 확인된 차(260902)보다 구버전입니다." $STF'
 rm -f $T/product; : > $VR/bk/wifi.nopart; mv $VR/mod/mod.json $VR/mod.json.keep; vr; rm -f $VR/bk/wifi.nopart; mv $VR/mod.json.keep $VR/mod/mod.json
 check "  근거 있는 '부품 없음'이면 먼저 할 일을 보이지 않음(부품 없음 안내가 앞섬)" '[ "$(vkey verdict)" = nopart ] && grep -qx "first=" $STF'
 : > $VR/inst; vr; echo "version 1.0.2" > $VR/inst
@@ -2755,10 +3289,12 @@ check "  리뷰 L-1: 원인이 분명한 판정(HMG-API 없음 등)에는 먼저
 # U-10: 확인 안 된 한국 차(README ✅ 아님)가 연결되면 제보 부탁
 echo "$VPS" > $T/ps; echo "777 boot-T" > $VR/dns.pid; echo TESTX.KOR.0000.V001.001.260902 > $T/product; VPN=$PROCNET; vr; VPN=; rm -f $T/product
 check "1.7.3 U-10: 확인 안 된 차가 연결되면 newconnected, '연결됐습니다! QR로 ...지원 목록에 올립니다.'(수준 0)" '[ "$(vkey verdict)" = newconnected ] && [ "$(vkey verdict_lv)" = 0 ] && grep -q "^verdict_msg=연결됐습니다! QR로 .연결됨.을 알려 주시면 지원 목록에 올립니다." $STF'
+echo "$VPS" > $T/ps; echo "777 boot-T" > $VR/dns.pid; echo SP222.KOR.S5W_M.V039.001.260902 > $T/product; VPN=$PROCNET; vr; VPN=; rm -f $T/product
+check "  묶음 G 후속: 새 ✅ 차(셀토스 SP222)가 연결되면 newconnected가 아니라 connected" '[ "$(vkey verdict)" = connected ]'
 # 리뷰 M-5: 공개 README 지원 표의 ✅ 차종 코드와 CARS_SEEN이 같음(README가 바뀌면 같이 알아채게)
 RMC=$(grep '✅' $B/../public/README.md 2>/dev/null | grep -o '`[A-Z0-9]*`' | tr -d '`' | sort -u | tr '\n' ' ')
 CSC=$(sed -n "s/^CARS_SEEN='\(.*\)'$/\1/p" $PKG/svc/hotspot.sh | tr ' ' '\n' | sed 's/\..*//' | sort -u | tr '\n' ' ')
-check "1.7.3 리뷰 M-5: README ✅ 차종 코드와 CARS_SEEN이 같음(30종)" '[ -n "$RMC" ] && [ "$RMC" = "$CSC" ] && [ "$(echo $RMC | wc -w | tr -d " ")" = 30 ]'
+check "1.7.3 리뷰 M-5·1.7.4 B-5·묶음 G 후속: README ✅ 차종 코드와 CARS_SEEN이 같음(43종)" '[ -n "$RMC" ] && [ "$RMC" = "$CSC" ] && [ "$(echo $RMC | wc -w | tr -d " ")" = 43 ]'
 check "  K-5: modhooks·hooks는 HMG-API 로그를 한 번만 읽은 값(hmg_hooks_load)을 씀, 판정 함수는 하나(kp_verdict)" 'grep -qx "modhooks_state() { hmg_hooks_load; echo \"\$_MH\"; }" $PKG/bin/status.sh && grep -qx "hooks_state() { hmg_hooks_load; echo \"\$_HK\"; }" $PKG/bin/status.sh && [ "$(grep -c "^kp_verdict() {" $PKG/bin/status.sh)" = 1 ]'
 [ $FEATVR = 1 ] || rm -f $T/feat; mv $T/ps.vr $T/ps 2>/dev/null; rm -rf $VR
 # --- 2b. Launch가 뒤에서 HMG-API Car Report를 USB에 저장 (지원 목록에 없거나 훅이 꺼진 차) ---
@@ -2920,6 +3456,11 @@ check "  리뷰 M1: 다시 깐 뒤에는 Launch가 또 설치하지 않음" '! g
 rm -f $NB/bk2/app.vc $NB/calls $NB/w/app-try; echo boot-M1b > $NB/bootid
 (STATUS=$STF BB=$NB/none BK=$NB/bk2 BOOT_ID=$NB/bootid APP=$T/app SRC=$T/softap.conf W=$NB/w APK_SRC=$NB/fake.apk APK_COPY=$NB/copy4.apk sh $NB/st2.sh) > $NB/out 2>&1
 check "  리뷰 M1: 기록이 없어도(1.7.2에서 올라와 post.sh 설치가 실패함) 다시 설치" 'grep -q "^pm install -r $NB/copy4.apk" $NB/calls'
+# 1.7.4 B-7: app.vc를 쓰지 못하면(여기서는 같은 이름의 폴더) 제보에 들어가는 app-install.log에 한 줄
+rm -f $NB/calls $NB/w/app-try $NB/w/app-install.log $NB/bk2/app.vc; mkdir -p $NB/bk2/app.vc; echo boot-B7 > $NB/bootid
+(STATUS=$STF BB=$NB/none BK=$NB/bk2 BOOT_ID=$NB/bootid APP=$T/app SRC=$T/softap.conf W=$NB/w APK_SRC=$NB/fake.apk APK_COPY=$NB/copy4.apk sh $NB/st2.sh) > $NB/out 2>&1
+check "1.7.4 B-7: 앱 설치는 됐는데 판 기록(app.vc)을 못 쓰면 app-install.log에 남기고, 셸 오류 줄은 화면 출력에 섞이지 않음" 'grep -q "^pm install -r $NB/copy4.apk" $NB/calls && grep -q "상태 화면 앱 판 기록을 쓰지 못함" $NB/w/app-install.log && ! grep -q "app.vc: Is a directory\|cannot create" $NB/out'
+rmdir $NB/bk2/app.vc
 check "  리뷰 M1: APK_VC가 앱 소스의 versionCode와 같음(올릴 때 함께)" '[ "$(sed -n "s/^APK_VC=//p" $PKG/svc/hotspot.sh)" = "$(sed -n "s/.*android:versionCode=\"\([0-9]*\)\".*/\1/p" $B/nemesis-pkg/app-src/AndroidManifest.xml)" ]'
 # 마지막 묶음 L1: 옛 앱이 있는데 이 판 설치가 계속 실패하면(서명 다름 등) 부팅마다 되풀이하지 않고 3번에서 멈춤
 mkdir -p $NB/bin3
@@ -2944,6 +3485,20 @@ echo "11-06 21:00:00 pm install: Failure [INSTALL_FAILED_X]" > $T/w/app-install.
 HMGLOG=$T/hl STATUS=$STF BB=$T/bin/bb APP=$T/app SRC=$T/softap.conf W=$T/w sh $T/st.sh >/dev/null 2>&1
 check "3-log.txt에 상태 화면 앱 설치 기록(app-install.log) 칸" 'grep -q "^== app-install.log" $G3 && grep -q "INSTALL_FAILED_X" $G3'
 rm -f $T/w/app-install.log
+# 1.7.4(P-3, #228): 칩 실패 근거(nochip-wifi.txt)가 재설치·업데이트로 $W에서 지워지면 3-log에 "(없음)"만 실렸다. $BK 사본을 같은 가리기로 싣는다
+mkdir -p $T/bk3p; rm -f $T/w/nochip-wifi.txt $T/bk3p/nochip-wifi.txt
+printf '%s\n' "# 칩 깨우기 실패 기록" "판정 근거: 순정 module_version=3 (사본 표시)" "폰 10.1.2.3 a1:b2:c3:d4:e5:f6" > $T/bk3p/nochip-wifi.txt
+BK=$T/bk3p HMGLOG=$T/hl STATUS=$STF BB=$T/bin/bb APP=$T/app SRC=$T/softap.conf W=$T/w sh $T/st.sh >/dev/null 2>&1
+sed -n '/^== nochip-wifi.txt$/,/^== map-car.txt$/p' $G3 > $T/p3a
+check "1.7.4 P-3: \$W에 칩 실패 근거가 없고 \$BK 사본만 있으면 3-log에 사본을 싣고(사본에서 왔다고 한 줄) 같은 가리기(IP·MAC 없음)" 'grep -q "판정 근거: 순정 module_version=3 (사본 표시)" $T/p3a && grep -q "백업 폴더의 사본" $T/p3a && ! grep -q -i -e 10.1.2.3 -e "a1:b2:c3" $T/p3a && ! grep -qx "(없음)" $T/p3a'
+rm -f $T/bk3p/nochip-wifi.txt; BK=$T/bk3p HMGLOG=$T/hl STATUS=$STF BB=$T/bin/bb APP=$T/app SRC=$T/softap.conf W=$T/w sh $T/st.sh >/dev/null 2>&1
+sed -n '/^== nochip-wifi.txt$/,/^== map-car.txt$/p' $G3 > $T/p3b
+check "  P-3: 둘 다 없으면 예전처럼 '(없음)'" 'grep -qx "(없음)" $T/p3b && ! grep -q "백업 폴더의 사본" $T/p3b'
+echo "판정 근거: 지금 기록" > $T/w/nochip-wifi.txt; echo "판정 근거: 사본" > $T/bk3p/nochip-wifi.txt
+BK=$T/bk3p HMGLOG=$T/hl STATUS=$STF BB=$T/bin/bb APP=$T/app SRC=$T/softap.conf W=$T/w sh $T/st.sh >/dev/null 2>&1
+sed -n '/^== nochip-wifi.txt$/,/^== map-car.txt$/p' $G3 > $T/p3c
+check "  P-3: \$W에 있으면 그것만 싣고 사본은 싣지 않음(예전과 같음)" 'grep -q "판정 근거: 지금 기록" $T/p3c && ! grep -q "판정 근거: 사본" $T/p3c && ! grep -q "백업 폴더의 사본" $T/p3c'
+rm -rf $T/bk3p $T/w/nochip-wifi.txt $T/p3a $T/p3b $T/p3c
 # 설정 중 안내: 할 일이 남았을 때만
 sp() { (HOTSPOT_LIB=1 BB=$T/bin/bb W=$NB/w BK=$NB/bk HMGDATA=$NB/hd WPDIR=$NB/wp sh -c '. '$T'/app/svc/hotspot.sh; setup_pending'); }
 check "setup_pending: 모드가 없고 다시 하지 않기로 한 기록이 없으면 설정 중" 'sp'
@@ -2996,7 +3551,7 @@ rm -f $T/ps; mv $T/ps.keep $T/ps 2>/dev/null
 # post.sh·preun.sh·status.sh는 BB를 정하지 않고 hotspot.sh가 고르게 한다
 check "  post.sh·preun.sh는 BB를 비워 두고 hotspot.sh를 ps보다 먼저 읽음(1.7.3 K-6: post.sh는 ps를 쓰지 않음)" 'grep -qx "BB=" $PKG/scripts/post.sh && grep -qx "BB=" $PKG/scripts/preun.sh && { ! grep -q "\$PS" $PKG/scripts/post.sh || [ "$(grep -n "hotspot.sh$" $PKG/scripts/post.sh | cut -d: -f1)" -lt "$(grep -n "\$PS" $PKG/scripts/post.sh | head -1 | cut -d: -f1)" ]; }'
 check "  ps는 모두 \$PS로 부름(\$BB ps 직접 호출 없음)" '! grep -n -F "\$BB ps" $PKG/svc/hotspot.sh $PKG/bin/status.sh $PKG/bin/carreport.sh $PKG/scripts/post.sh $PKG/scripts/preun.sh | grep -v "then PS="'
-check "  status.sh는 뒤에서 띄우는 감시자(--watch)·--wait에 고른 BB를 넘김" '[ "$(grep -c "BB=\$BB .*setsid" $PKG/bin/status.sh)" = 2 ]'
+check "  status.sh는 뒤에서 띄우는 감시자(--watch, 1.7.4 B-7 끝날 때 다시 띄움 포함)·--wait에 고른 BB를 넘김" '[ "$(grep -c "BB=\$BB .*setsid" $PKG/bin/status.sh)" = 3 ]'
 # 1.7.2(P-9): busybox(GPL-2.0) 라이선스 안내를 패키지 bin/에 두고, USB 묶음을 만들 때 빠졌으면 멈춘다
 check "1.7.2 P-9: 패키지에 bin/busybox-LICENSE.txt(GPL-2.0, 대응 소스 위치, 패키지 busybox와 같은 SHA-256)" 'f=$PKG/bin/busybox-LICENSE.txt; grep -q "GPL-2.0" $f && grep -q "busybox-1.36.1.tar.bz2" $f && grep -q "aports/-/tree/3.20-stable/main/busybox" $f && { [ ! -f $PKG/bin/busybox ] || grep -q "$(shasum -a 256 < $PKG/bin/busybox | cut -c1-64)" $f; }'
 mkdir -p $T/p9/pk/bin $T/p9/out; cp $PKG/NEMESIS.data $T/p9/pk/; echo bb > $T/p9/pk/bin/busybox
@@ -3013,7 +3568,8 @@ fi
 bsel BB= BB_SYS=$BS/none BB_OWN=$T/app/bin/busybox > $BS/out
 check "  내비에 busybox가 없고 패키지에도 없으면 BB_OK=0(서비스는 '지원 조사 중'으로 대기)" 'grep -qx "OK=0" $BS/out'
 # 진짜 busybox 1.36.1(ARM)로 확인: Docker와 alpine:3.20 arm/v7 이미지가 이 PC에 있을 때만(없으면 건너뜀, 받지 않음)
-if command -v docker >/dev/null 2>&1 && docker image inspect --platform linux/arm/v7 alpine:3.20 >/dev/null 2>&1; then
+# 디버그 로그 USB 작업 때: 이미지 조회가 가끔 "No such image"를 내므로, 안 되면 한 번 실행해 깨운다(받지 않음: --pull never)
+if command -v docker >/dev/null 2>&1 && { docker image inspect --platform linux/arm/v7 alpine:3.20 >/dev/null 2>&1 || docker run --rm --pull never --platform linux/arm/v7 alpine:3.20 true >/dev/null 2>&1; }; then
   cat > $BS/real.sh <<'E'
 B=/vb/busybox
 mkdir -p /x; echo 'while :; do sleep 1; done' > /x/hostapd
@@ -3034,19 +3590,27 @@ printf '\000\005hi\377' > /tmp/b; set -- $(for _t in $($B od -b -v /tmp/b); do [
 echo hi > /tmp/f; chmod 640 /tmp/f; echo "perm=$(f_perm /tmp/f) owner=$(f_owner /tmp/f)"
 echo "md5=$(echo hi | $B md5sum)"
 # 4b 리뷰 L-2: 진짜 busybox(printf·od)로 parse_conf·conf_auth가 1.7.2 원본과 같은가. 비교는 하위 셸에서(parse_conf가 B 등을 바꿈)
-_pn=0; _pd=0
-for f in /t/pk/c??; do
-  _pn=$((_pn+1))
+# 묶음 J: 1.7.4(B-6)부터 한글이 든 c01·c04는 1.7.2와 달라야 한다(PC 시험과 같은 기준). 나머지 9개는 같아야 한다.
+# 실제 순정 꼴 견본 k1~k7까지 파일마다 결과의 md5를 내어 PC(가짜 busybox) 결과와 바이트까지 같은지 밖에서 대조한다(값 글자는 남기지 않음)
+_pn=0; _pd=0; _pk=0
+for f in /t/pk/c?? /t/pk/k?; do
   _pa=$(parse_conf $f; printf '%s|' "$NS" "$S1" "$S2" "$S3" "$S4" "$S5"; conf_auth $f)
+  echo "pkh ${f##*/} $(printf '%s' "$_pa" | $B md5sum | $B awk '{ print $1 }')"
+  case ${f##*/} in k?) continue ;; esac
+  _pn=$((_pn+1))
   _pb=$(. /t/ref-parse.sh; parse_conf $f; printf '%s|' "$NS" "$S1" "$S2" "$S3" "$S4" "$S5"; conf_auth $f)
+  case ${f##*/} in c01|c04) [ "$_pa" != "$_pb" ] && _pk=$((_pk+1)); continue ;; esac
   [ "$_pa" = "$_pb" ] && _pd=$((_pd+1))
 done
-echo "pkcmp=$_pd/$_pn"
+echo "pkcmp=$_pd/$_pn ko=$_pk"
 E
   cp -R $PK $BS/pk; cp $T/ref-parse.sh $BS/ref-parse.sh
   docker run --rm --pull never --platform linux/arm/v7 -v $T/app:/app:ro -v $B/vendor/busybox:/vb:ro -v $BS:/t:ro alpine:3.20 /vb/busybox sh /t/real.sh > $BS/real.out 2>&1
   check "  진짜 busybox(ARM 컨테이너): 실행됨, ps -o로 좀비를 보고 우리·순정 hostapd를 구분, 우리 것만 멈춤" 'grep -qx "OK=1" $BS/real.out && grep -qx "PS=/vb/busybox ps -o pid,stat,args" $BS/real.out && grep -qx zombie-seen $BS/real.out && grep -qx ours-running $BS/real.out && grep -qx stock-on $BS/real.out && grep -qx ours-stopped $BS/real.out && grep -qx stock-alive $BS/real.out'
-  check "  4b 리뷰 L-2: 진짜 busybox로도 parse_conf·conf_auth가 1.7.2 원본과 같음(11개)" 'grep -qx "pkcmp=11/11" $BS/real.out'
+  check "  4b 리뷰 L-2·묶음 J: 진짜 busybox로도 parse_conf·conf_auth가 1.7.2 원본과 같음(한글 아닌 9개), 한글이 든 c01·c04는 1.7.4 B-6대로 1.7.2와 다름" 'grep -qx "pkcmp=9/11 ko=2" $BS/real.out'
+  # 묶음 J: 같은 파일(c00~c10, 순정 꼴 k1~k7)을 PC의 가짜 busybox로 읽은 결과의 md5와 줄마다 같은가
+  for f in $PK/c?? $PK/k?; do _pa=$(HOTSPOT_LIB=1 BB=$T/bin/bb SRC=$f W=$T/w sh -c '. '$T'/app/svc/hotspot.sh; parse_conf $SRC; printf "%s|" "$NS" "$S1" "$S2" "$S3" "$S4" "$S5"; conf_auth $SRC'); echo "pkh ${f##*/} $(printf '%s' "$_pa" | md5 -q)"; done > $BS/pc.pkh
+  check "  묶음 J: 진짜 busybox(ARM)와 PC(가짜 busybox)의 parse_conf·conf_auth 결과가 18개 파일(c00~c10, 순정 꼴 k1~k7) 모두 바이트까지 같음" '[ "$(grep -c "^pkh " $BS/pc.pkh)" = 18 ] && [ "$(grep "^pkh " $BS/real.out)" = "$(cat $BS/pc.pkh)" ]'
   check "  진짜 busybox: od -b -v 바이트, f_perm·f_owner, md5sum 표준입력" 'grep -qx "od=000 005 150 151 377" $BS/real.out && grep -qx "perm=640 owner=0:0" $BS/real.out && grep -qx "md5=764efa883dda1e11db47671c4a3bbd9e  -" $BS/real.out'
 else
   echo "skip 진짜 busybox 확인(Docker 또는 alpine:3.20 arm/v7 이미지 없음)"
@@ -3079,11 +3643,635 @@ check "6단계 리뷰 L2: 제보의 로그 모음에 mod-update.txt도 들어감
 check "6단계 리뷰 L6: 삭제·업데이트 때 Car Report 저장(carreport.lock/pid의 carreport.sh)도 멈춤" 'grep -q "^for _pf in wait.pid watch.pid collect.pid carreport.lock/pid; do$" $PKG/scripts/preun.sh && grep -q "\*status.sh\*|\*carreport.sh\*) kill" $PKG/scripts/preun.sh'
 check "6단계 리뷰 L9·M2: 진짜 삭제 갈래에서만 되돌리기 USB 작업 폴더·재부팅 결과 파일을 지움(업데이트 갈래 뒤)" '[ "$(grep -n "업데이트: 이전 버전 정리" $PKG/scripts/preun.sh | cut -d: -f1)" -lt "$(grep -n "^rm -rf \${KP_RB_D:-/data/local/tmp/kp-rollback}$" $PKG/scripts/preun.sh | cut -d: -f1)" ] && [ "$(grep -n "업데이트: 이전 버전 정리" $PKG/scripts/preun.sh | cut -d: -f1)" -lt "$(grep -n "^rm -f \$RBRES \$RBRES.tmp$" $PKG/scripts/preun.sh | cut -d: -f1)" ]'
 check "6단계 리뷰 L10: 아직 옛 판인데 '바꿨습니다'라 하지 않고, 이번 부팅에 시도했는데 옛 판이면 '이번에는 못 바꿈, 재부팅하면 다시'" '! grep -q "무선 모드를 새 판으로 바꿨습니다. 재부팅하고" $PKG/bin/status.sh && grep -q "재부팅하면 무선 모드를 새 판으로 바꿉니다. 재부팅하고 3분 뒤 한 번 더 재부팅해 주세요(남은 재부팅 2번)." $PKG/bin/status.sh && grep -q "무선 모드를 이번에는 새 판으로 바꾸지 못했습니다. 재부팅하면 다시 시도합니다." $PKG/bin/status.sh && awk "/^mod_update\(\) \{/,/^}/" $PKG/svc/hotspot.sh | grep -q "> \$BK/mod.try$"'
-check "  6단계 리뷰 L10: 세 문장 안내 두 곳을 두 문장으로(Car Report 실패, 자동 설정 끝)" '! grep -q "이제 USB를 빼셔도 됩니다. 필요하면 USB를 다시 꽂고" $PKG/bin/carreport.sh && grep -q "Car Report는 저장하지 못했습니다(필요하면 USB를 다시 꽂고 \[제보 파일 만들기\]). 이제 USB를 빼셔도 됩니다." $PKG/bin/carreport.sh && grep -q "내비를 재부팅(RESET 버튼 또는 NEMESIS 재부팅)한 뒤 결과를 제보해 주시면 지원 목록에 넣습니다." $PKG/svc/hotspot.sh'
-check "6단계 리뷰 M3: hmgapi/README.txt의 모드 판 문구가 2.4.1(Korea Projection 1.7.3)" 'grep -q "한국 차 빌드 2.4.1입니다(Korea Projection 1.7.3)" $PKG/hmgapi/README.txt && ! grep -q "2.3.0입니다(Korea Projection 1.7.1)" $PKG/hmgapi/README.txt'
+check "  6단계 리뷰 L10: 세 문장 안내 두 곳을 두 문장으로(Car Report 실패, 자동 설정 끝)" '! grep -q "이제 USB를 빼셔도 됩니다. 필요하면 USB를 다시 꽂고" $PKG/bin/carreport.sh && grep -q "Car Report는 저장하지 못했습니다(필요하면 USB를 다시 꽂고 \[제보 파일 만들기\]). 이제 USB를 빼셔도 됩니다." $PKG/bin/carreport.sh && grep -q "내비를 3분 후 재부팅한 뒤 결과를 제보해 주시면 지원 목록에 넣습니다." $PKG/svc/hotspot.sh'
+check "1.7.4 묶음 E: 재부팅 알림 세 곳(새 판·설정 끝·자동 설정 끝)이 '3분 후 재부팅', RESET 괄호 없음" 'grep -q "pnotice \"Korea Projection: 무선 모드를 새 판(\$MOD_VER)으로 바꿨습니다. 내비를 3분 후 재부팅해 주세요.\"" $PKG/svc/hotspot.sh && grep -q "pnotice \"Korea Projection: 무선 카플레이 설정을 마쳤습니다. 내비를 3분 후 재부팅해 주세요.\"" $PKG/svc/hotspot.sh && grep -q "pnotice \"Korea Projection: 무선 카플레이 설정을 마쳤습니다(자동으로 설정한 차). 내비를 3분 후 재부팅한 뒤" $PKG/svc/hotspot.sh && ! grep -q "pnotice .*RESET 버튼" $PKG/svc/hotspot.sh'
+check "  묶음 E 4번: 부팅 보호 문구(앱 RB_GUARD·ap.log 거절 줄·되돌리기 USB 고정 풀기)가 3분" 'grep -q "RB_GUARD = \"3분 안에 재부팅을 반복하면 HMG-API가 무선 기능을 끕니다. 내비가 켜지고 3~5분 뒤에" $B/nemesis-pkg/app-src/java/korea/projection/app/Report.java && grep -q "(3분 안에 재부팅을 반복하면 훅이 꺼짐)" $PKG/bin/status.sh && grep -q "재부팅 약 3분 뒤 새 판으로" $B/usb-modrollback/NEMESIS.sh $B/usb-modrollback/GUIDE-ko.md && ! grep -q "약 2분 뒤" $B/usb-modrollback/GUIDE-ko.md'
+check "6단계 리뷰 M3·1.7.4 B-3·묶음 G: hmgapi/README.txt의 모드 판 문구가 2.4.5(Korea Projection 1.7.4 정식)와 새 이름" 'grep -q "한국 차 빌드 2.4.5입니다(Korea Projection 1.7.4)" $PKG/hmgapi/README.txt && ! grep -q "2.4.4입니다" $PKG/hmgapi/README.txt && grep -q "\"Korea Projection: Wireless CarPlay + Android Auto\"로 보입니다" $PKG/hmgapi/README.txt && ! grep -q "2.4.1입니다(Korea Projection 1.7.3)" $PKG/hmgapi/README.txt && ! grep -q "2.4.2입니다" $PKG/hmgapi/README.txt && ! grep -q "2.4.3입니다" $PKG/hmgapi/README.txt'
+# 묶음 G(D-20, 모드 2.4.3): README.txt가 설명하는 한국 차 빌드 설정(들여 쓴 "- <키>:" 줄)이 정확히 tbt_fit·aa_name_hold·aa_ready_resend이고 셋 다 zip settings.json에 있음. 방향 문장
+RDS=$(unzip -p $PKG/hmgapi/wireless-carplay-aa.zip settings.json 2>/dev/null | python3 -c 'import json,sys; print(" ".join(s["key"] for s in json.load(sys.stdin)["settings"]))' 2>/dev/null)
+RDK=$(sed -n "s/^    - \([a-z_][a-z_]*\): .*/\1/p" $PKG/hmgapi/README.txt | sort | tr "\n" " ")
+check "  묶음 G·1.7.4 정식: README.txt가 설명하는 설정이 tbt_fit·aa_name_hold·aa_ready_resend·star_popup_skip 넷뿐이고 모두 zip settings.json에 있음, 큰 그림 없다는 문장은 지움, 보정 방향 문장" '[ "$RDK" = "aa_name_hold aa_ready_resend star_popup_skip tbt_fit " ] && (for k in $RDK; do case " $RDS " in *" $k "*) ;; *) exit 1 ;; esac; done) && ! grep -q "도로 이름 붙잡기는 없습니다" $PKG/hmgapi/README.txt && grep -Fq "계기판·HUD 길안내는 지도 앱이 보낸 것을 순정 표대로 전달하고, 현대·기아 순정 내비 화면에 맞춰 보정합니다(2.4.3부터). 보정을 끄면 순정 표 그대로 전달합니다." $PKG/hmgapi/README.txt'
+# 묶음 G 리뷰 낮음: 설정은 앱에 영문 제목(zip settings.json의 title)으로 보일 수 있다. README·되돌리기 안내서의 제목 글자가 zip과 같은가
+RDT=$(unzip -p $PKG/hmgapi/wireless-carplay-aa.zip settings.json 2>/dev/null | python3 -c 'import json,sys
+for s in json.load(sys.stdin)["settings"]:
+    if s["key"] in ("tbt_fit", "aa_name_hold", "aa_ready_resend", "star_popup_skip"): print(s["key"] + "\t" + s["title"])' 2>/dev/null)
+check "  묶음 G 리뷰·1.7.4 정식: README.txt의 설정 넷과 안내서의 tbt_fit에 zip settings.json의 영문 제목이 글자 그대로 있음, '베타 1과 같음' 대신 '무선 모드 2.4.2와 같음'" '[ "$(printf "%s\n" "$RDT" | grep -c .)" = 4 ] && (printf "%s\n" "$RDT" | while IFS="$(printf "\t")" read -r k ti; do grep -Fq "    - $k: 앱에는 \"$ti\"로 보입니다. " $PKG/hmgapi/README.txt || exit 1; done) && grep -Fq "\`tbt_fit\`(앱에는 \"$(printf "%s\n" "$RDT" | awk -F "\t" "\$1 == \"tbt_fit\" { print \$2 }")\"로 보입니다)" $B/usb-modrollback/GUIDE-ko.md && grep -Fq "(무선 모드 2.4.2와 같음)" $PKG/hmgapi/README.txt && ! grep -q "1.7.4 베타 1과 같음" $PKG/hmgapi/README.txt'
 rm -rf $S6
 
 # 4b K-11(2026-11-10): 진단 USB 스크립트(kp-probe·kp-wifi-diag·5GHz·A/B·kp-sys-restore)의 시험은 tests/legacy/legacy-test.sh로 옮겼다(지우지 않음).
+
+# --- 1.7.4 Q-6(묶음 D): 동글 읽기 전용 진단 USB(usb-donglediag). 내비에 쓰지 않고, 금지 명령을 부르지 않고, 비밀값이 결과에 없음 ---
+DG=$T/dg; DGS=$B/usb-donglediag/NEMESIS.sh
+mkdir -p $DG/bin $DG/usb $DG/mods $DG/proc $DG/drv/rtl88x2bu $DG/drv/usb-storage $DG/drv/usb \
+  $DG/sys/bus/usb/devices/usb1 $DG/sys/bus/usb/devices/1-1/1-1:1.0 $DG/sys/bus/usb/devices/1-2 $DG/sys/bus/usb/devices/1-3/1-3:1.0 \
+  $DG/sys/class/net/wlan0/wireless $DG/sys/class/net/rtwlan0 $DG/sys/class/net/eth0
+for f in idVendor:1d6b idProduct:0002 bDeviceClass:09 speed:480 serial:HUBSER11; do echo "${f#*:}" > $DG/sys/bus/usb/devices/usb1/${f%%:*}; done
+ln -s $DG/drv/usb $DG/sys/bus/usb/devices/usb1/driver
+for f in idVendor:0bda idProduct:b812 bDeviceClass:00 speed:480 serial:DGSER123 product:Johns-Phone-Dongle manufacturer:Kim-Realtek; do echo "${f#*:}" > $DG/sys/bus/usb/devices/1-1/${f%%:*}; done
+echo ff > $DG/sys/bus/usb/devices/1-1/1-1:1.0/bInterfaceClass; ln -s $DG/drv/rtl88x2bu $DG/sys/bus/usb/devices/1-1/1-1:1.0/driver
+echo " 1" > $DG/sys/bus/usb/devices/1-1/bNumInterfaces; echo 500mA > $DG/sys/bus/usb/devices/1-1/bMaxPower; echo 2 > $DG/sys/bus/usb/devices/usb1/maxchild
+for f in idVendor:04e8 idProduct:6860 bDeviceClass:00 speed:480 serial:PHONESER9 product:Galaxy-홍길동; do echo "${f#*:}" > $DG/sys/bus/usb/devices/1-2/${f%%:*}; done
+for f in idVendor:0781 idProduct:5567 bDeviceClass:00 speed:480 serial:STICKSER7; do echo "${f#*:}" > $DG/sys/bus/usb/devices/1-3/${f%%:*}; done
+echo 08 > $DG/sys/bus/usb/devices/1-3/1-3:1.0/bInterfaceClass; ln -s $DG/drv/usb-storage $DG/sys/bus/usb/devices/1-3/1-3:1.0/driver
+echo aa:bb:cc:dd:ee:ff > $DG/sys/class/net/wlan0/address; echo 11:22:33:44:55:66 > $DG/sys/class/net/rtwlan0/address; : > $DG/sys/class/net/rtwlan0/phy80211; echo 66:55:44:33:22:11 > $DG/sys/class/net/eth0/address
+echo "Linux version 3.18.24-tcc (secretbuilder@HOSTX) (gcc version 4.7 (GCC) ) #1 SMP PREEMPT" > $DG/proc/version
+printf '%s\n' "88x2bu 1200000 0 - Live 0x0" "cfg80211 200000 1 88x2bu, Live 0x0" > $DG/proc/modules
+echo "androidboot.serialno=SERIALZZ99 wifimac=DE:AD:BE:EF:00:11" > $DG/proc/cmdline
+printf '%s\n' "CONFIG_MODULES=y" "# CONFIG_MODULE_SIG is not set" "CONFIG_CFG80211=y" "CONFIG_USB_NET_RNDIS_HOST=y" "CONFIG_CMDLINE=\"androidboot.serialno=CFGSER55\"" | gzip -c > $DG/proc/config.gz
+: > $DG/mods/88x2bu.ko
+# 금지 명령: 불리면 기록만 남김. 가짜 bb는 받은 인자를 모두 적는다
+for c in insmod modprobe rmmod ifconfig svc hostapd wpa_supplicant setprop mount chmod chown iw iwconfig settings am; do printf '#!/bin/sh\necho "%s $*" >> %s/forbidden\n' $c $DG > $DG/bin/$c; done
+printf '#!/bin/sh\necho "$*" >> %s/bbargs\nexec %s/bin/bb "$@"\n' $DG $T > $DG/bin/bbrec; chmod +x $DG/bin/*
+sed "s#^export PATH=.*#export PATH=$DG/bin:/usr/bin:/bin:/sbin#" $DGS > $DG/run.sh
+# 리뷰 반영: 진단 USB는 /proc/mounts에 있는 USB에만 쓴다. 시험은 넘긴 U를 가짜 마운트 표(MOUNTS)에 올려 둔다
+dg() { echo "/dev/block/sda1 $1 vfat rw 0 0" > $DG/mounts; (U=$1 KSYS=$2 KPROC=$DG/proc KMODDIRS=$DG/mods BB=$DG/bin/bbrec MOUNTS=$DG/mounts sh $DG/run.sh) > $DG/out 2>&1; DGRC=$?; }
+: > $DG/before; /bin/sleep 1; dg $DG/usb $DG/sys; DGR=$DG/usb/kp-donglediag/RESULT.txt
+check "1.7.4 Q-6: 동글 진단 USB — umask 077이 맨 앞, 셸 문법(sh·ksh 계열), 결과 첫 줄이 안내 문구, 종료 0·출력 없음" '[ "$(sed -n 2p $DGS)" = "umask 077" ] && sh -n $DGS && for KSH in $KSHS; do $KSH -n $DGS || exit 1; done && [ "$(head -1 $DGR)" = "이 파일에는 일련번호·MAC·이름이 없습니다. 올리기 전에 한 번 읽어 보세요." ] && [ $DGRC = 0 ] && [ ! -s $DG/out ]'
+check "  Q-6: 동글 ID·종류·속도·붙은 드라이버, 폰은 제품 ID 가림(04e8:(폰)), 저장 장치·허브는 동글 후보가 아님, 모듈·config·장치 이름" 'grep -q "^- 1-1: 0bda:b812 class 00 인터페이스 1개(ff) speed 480 드라이버 rtl88x2bu 전류 500mA (RTL88x2BU 드라이버 표에 있는 ID)$" $DGR && grep -q "^- usb1: 1d6b:0002 class 09 인터페이스 ?개(없음) speed 480 드라이버 usb 전류 없음 포트 2$" $DGR && grep -q "^- 1-2: 04e8:(폰) " $DGR && ! grep -q 6860 $DGR && grep -q "^- 1-3: 0781:5567 class 00 인터페이스 ?개(08) speed 480 드라이버 usb-storage 전류 없음$" $DGR && grep -q "^- 동글 후보 장치: 1개$" $DGR && grep -q "^- 동글 후보는 허브·저장 장치·폰을 뺀 USB 장치입니다. 차에 원래 달린 장치가 들어 있을 수 있습니다.$" $DGR && grep -q "^- 모듈 88x2bu: 올라옴 예, 모듈 폴더에 88x2bu.ko 예$" $DGR && grep -q "^- 모듈 8812bu: 올라옴 아니요, 모듈 폴더에 8812bu.ko 아니요$" $DGR && grep -q "^  - CONFIG_USB_NET_RNDIS_HOST=y$" $DGR && grep -q "^- 커널: 3.18.24-tcc$" $DGR && grep -q "^- 장치: eth0 rtwlan0(무선) wlan0(무선)$" $DGR'
+check "  Q-6: 심은 일련번호·MAC·제품·제조사 문자열·폰 이름·빌드한 사람@호스트·커널 명령줄 값·config의 serialno가 결과에 한 글자도 없음" '! grep -q -e HUBSER11 -e DGSER123 -e Johns -e Kim -e Realtek -e PHONESER9 -e Galaxy -e 홍길동 -e STICKSER7 -e "aa:bb:cc" -e "11:22:33" -e "66:55:44" -e secretbuilder -e HOSTX -e SERIALZZ99 -e "DE:AD" -e CFGSER55 $DGR'
+check "  Q-6: insmod·modprobe·ifconfig·svc·hostapd·wpa_supplicant·setprop·mount·chmod 등을 한 번도 부르지 않고, busybox 인자에도 그 이름·hostapd가 없음" '[ ! -f $DG/forbidden ] && [ -s $DG/bbargs ] && ! grep -q -E "insmod|modprobe|ifconfig|svc|hostapd|wpa_supplicant|setprop|mount|chmod" $DG/bbargs'
+check "  Q-6: USB의 kp-donglediag 말고는 아무 데도 쓰지 않음(시험 폴더 전체($T)에서 진단 뒤 새로 생긴 파일은 결과·시험 기록·마운트 표뿐), 소스에 /data·/system 쓰기 없음" '[ "$(find $T -newer $DG/before -type f ! -name bbargs ! -name out ! -name mounts ! -path "$DG/usb/kp-donglediag/*" | wc -l | tr -d " ")" = 0 ] && ! grep -E ">[> ]*/(data|system)" $DGS | grep -q -v "^ *#"'
+# 동글이 없을 때(허브와 이 USB 같은 저장 장치뿐)
+mkdir -p $DG/sys2/bus/usb/devices $DG/sys2/class/net; cp -R $DG/sys/bus/usb/devices/usb1 $DG/sys/bus/usb/devices/1-3 $DG/sys2/bus/usb/devices/; dg $DG/usb $DG/sys2
+check "  Q-6: 허브·저장 장치뿐이면 '꽂힌 동글 없음'" 'grep -q "^- 꽂힌 동글 없음" $DGR && ! grep -q "동글 후보 장치" $DGR'
+# 묶음 I ⑦: 저장 장치(인터페이스 08)여도 가상 CD 모드로 알려진 동글 ID(0bda:a192)면 동글 후보로 세고 표시. 모듈 이름 목록
+mkdir -p $DG/sys2/bus/usb/devices/1-4/1-4:1.0; for f in idVendor:0bda idProduct:a192 bDeviceClass:00 speed:480; do echo "${f#*:}" > $DG/sys2/bus/usb/devices/1-4/${f%%:*}; done; echo 08 > $DG/sys2/bus/usb/devices/1-4/1-4:1.0/bInterfaceClass; dg $DG/usb $DG/sys2
+check "  묶음 I ⑦: 가상 CD 모드 ID(0bda:a192)는 저장 장치여도 '가상 CD 모드의 동글일 수 있음'으로 표시하고 동글 후보로 셈(이 USB 같은 저장 장치는 그대로 뺌)" 'grep -q "^- 1-4: 0bda:a192 .*(가상 CD 모드의 동글일 수 있음)$" $DGR && grep -q "^- 동글 후보 장치: 1개$" $DGR'
+check "  묶음 I ⑦: 모듈 이름 목록에 rtl88x2bu·8851bu·bcmdhd" 'grep -q "^- 모듈 rtl88x2bu: 올라옴 " $DGR && grep -q "^- 모듈 8851bu: 올라옴 " $DGR && grep -q "^- 모듈 bcmdhd: 올라옴 아니요" $DGR'
+# USB에 못 쓰면(읽기 전용) 조용히 끝남
+mkdir -p $DG/rousb; chmod 500 $DG/rousb; dg $DG/rousb $DG/sys; chmod 700 $DG/rousb
+check "  Q-6: USB에 쓰지 못하면 아무 출력 없이 0으로 끝나고 결과 파일도 없음" '[ $DGRC = 0 ] && [ ! -s $DG/out ] && [ ! -e $DG/rousb/kp-donglediag ]'
+# 리뷰 반영(중간 1): 마운트 표에 없는 U면 폴더를 만들지 않고 0으로 끝남
+mkdir -p $DG/nomount; : > $DG/mounts; (U=$DG/nomount KSYS=$DG/sys KPROC=$DG/proc KMODDIRS=$DG/mods BB=$DG/bin/bbrec MOUNTS=$DG/mounts sh $DG/run.sh) > $DG/out 2>&1; DGRC=$?
+check "  Q-6 리뷰: 넘긴 U가 마운트 표에 없으면(빈 마운트 지점) 아무것도 쓰지 않고 0으로 끝남" '[ $DGRC = 0 ] && [ ! -s $DG/out ] && [ ! -e $DG/nomount/kp-donglediag ]'
+# U를 넘기지 않을 때: 스크립트 위치($0)가 usb1이면 usb1을 먼저, 아니면 usb0 먼저. 마운트된 쪽만
+DGU=$(sed -n '/^dg_mounted() {/,/^\[ -n "\$U" \] || exit 0$/p' $DGS)
+printf '%s\n' "/dev/block/sda1 /storage/usb1 vfat rw 0 0" "/dev/block/sdb1 /storage/usb0 vfat rw 0 0" > $DG/m2; echo "/dev/block/sdb1 /storage/usb0 vfat rw 0 0" > $DG/m3
+DGU1=$(U= MOUNTS=$DG/m2 sh -c "$DGU
+echo \$U" /storage/usb1/NEMESIS.sh); DGU2=$(U= MOUNTS=$DG/m2 sh -c "$DGU
+echo \$U" /storage/usb0/NEMESIS.sh); DGU3=$(U= MOUNTS=$DG/m3 sh -c "$DGU
+echo \$U" /storage/usb1/NEMESIS.sh); DGU4=$(U= MOUNTS=$DG/mounts sh -c "$DGU
+echo FOUND" /storage/usb1/NEMESIS.sh)
+check "  Q-6 리뷰: U 없이 \$0이 usb1이면 usb1, usb0이면 usb0, usb1이 안 붙었으면 usb0, 둘 다 없으면 끝냄" '[ -n "$DGU" ] && [ "$DGU1" = /storage/usb1 ] && [ "$DGU2" = /storage/usb0 ] && [ "$DGU3" = /storage/usb0 ] && [ -z "$DGU4" ]'
+# 리뷰 반영(중간 2): busybox가 없고 PATH에 awk도 없으면 USB·커널·모듈·장치 칸을 적지 않음(폰 제품 ID·비밀값이 한 글자도 없음)
+sed "s#^export PATH=.*#export PATH=$DG/bin:/bin#" $DGS > $DG/run-nobb.sh; echo "/dev/block/sda1 $DG/usb vfat rw 0 0" > $DG/mounts
+(U=$DG/usb KSYS=$DG/sys KPROC=$DG/proc KMODDIRS=$DG/mods BB= BB_SYS=$DG/none BB_OWN=$DG/none MOUNTS=$DG/mounts /bin/sh $DG/run-nobb.sh) > $DG/out 2>&1; DGRC=$?
+check "  Q-6 리뷰: busybox·awk 없음 → 첫 줄 안내와 '확인 안 됨(busybox 없음)'만, 폰 제품 ID(6860)·심은 비밀값·장치 줄 없음" '[ $DGRC = 0 ] && [ "$(head -1 $DGR)" = "이 파일에는 일련번호·MAC·이름이 없습니다. 올리기 전에 한 번 읽어 보세요." ] && grep -q "확인 안 됨(busybox 없음)" $DGR && ! grep -q -e 6860 -e 04e8 -e 0bda -e DGSER123 -e Johns -e "aa:bb" -e secretbuilder -e "^- usb1" -e "동글 후보" $DGR'
+dgfn() { sed -n -e '/^dn_safe() {/p' -e '/^dn_hex4() {/p' -e '/^dn_first() {/p' -e '/^dn_is_phone() {/,/^}/p' -e '/^dn_usb_id() {/,/^}/p' -e '/^dn_link_name() {/,/^}/p' -e '/^dn_id_note() {/,/^}/p' "$1"; }
+dgfn $DGS > $DG/fn.usb; dgfn $PKG/bin/status.sh > $DG/fn.pkg
+check "  Q-6·묶음 I: USB ID·글자 거르기 함수(dn_safe·dn_hex4·dn_first·dn_is_phone·dn_usb_id·dn_link_name·dn_id_note)가 패키지 status.sh와 글자까지 같음" '[ "$(wc -l < $DG/fn.usb | tr -d " ")" -ge 28 ] && cmp -s $DG/fn.usb $DG/fn.pkg'
+
+# --- 1.7.4 베타 2 니로 화면 멈춤(2026-11-15) 조사: 디버그 로그 꺼내기 USB(usb-debuglog). 읽기만, USB에만 씀 ---
+# 차 쪽 가짜 폴더: $DL/car(w = $W, ap = ap.log 폴더, anr, tomb, drop). USB: $DL/usb. 시각은 touch -t로 정한다
+DL=$T/dl; DLS=$B/usb-debuglog/NEMESIS.sh
+mkdir -p $DL/bin $DL/usb $DL/car/w $DL/car/ap $DL/car/anr $DL/car/tomb $DL/car/drop
+# cp.log는 쓸 때 이미 가려진 것(uniq -c 꼴). 그대로 복사되는지 보려고 줄마다 다르게 둔다
+printf '%s\n' "      1 11-15 15:34:10.100 D/iAP2( 100): a3" "      2 11-15 15:40:00.200 D/iAP2( 100): b3" > $DL/car/w/cp.log.3
+printf '%s\n' "      1 11-15 16:20:01.000 D/iAP2( 100): a2" "      1 11-15 16:40:59.000 D/iAP2( 100): b2" > $DL/car/w/cp.log.2
+printf '%s\n' "      1 11-15 16:41:00.000 D/iAP2( 100): a1" "      1 11-15 16:53:30.500 I/CarPlay_( 200): reconnect" > $DL/car/w/cp.log.1
+printf '%s\n' "      1 11-15 17:04:00.000 D/iAP2( 100): a0" "      3 11-15 17:08:12.000 D/iAP2( 100): b0" > $DL/car/w/cp.log
+printf '%s\n' "16:53:00 up=4800 load=2.1 cpu=30 sta=1" "17:02:39 up=5379 load=2.4 cpu=33 sta=1" > $DL/car/w/perf.log
+printf '%s\n' "15:34:30 up=10 load=1.0 cpu=50 sta=0" > $DL/car/w/perf.log.1
+: > $DL/car/w/debug
+# ap.log에는 가려야 할 값을 심는다(IP·MAC·이름). 남아야 할 줄도 하나
+printf '%s\n' "11-15 16:53:05 Wi-Fi: 끊김 10.1.2.3 a1:b2:c3:d4:e5:f6" "11-15 16:53:30 카플레이 연결 1" "11-15 16:53:31 device name=홍길동폰" > $DL/car/ap/ap.log
+printf '%s\n' "11-15 15:34:00 서비스 시작: 이번 부팅 처음" > $DL/car/ap/ap.log.1
+# ANR·tombstone·dropbox: 심은 값(폰 이름·MAC·IP·전화번호)이 사본에 없어야 한다
+printf '%s\n' '----- pid 1234 at 2026-11-15 16:55:01 -----' '"main" prio=5 tid=1 MONITOR' '"Johns iPhone" prio=5 tid=9 Native' '  at com.x.Y(Y.java:10) peer 10.1.2.3 mac a1:b2:c3:d4:e5:f6' > $DL/car/anr/traces.txt
+printf '%s\n' "pid: 321, tid: 322, name: Binder_1  >>> /system/bin/mediaserver <<<" "signal 11 (SIGSEGV) call 010-1234-5678 from 10.1.2.3" > $DL/car/tomb/tombstone_00
+printf '%s\n' "OLDSECRET pid: 9 >>> x <<<" > $DL/car/tomb/tombstone_01
+printf '%s\n' "pid: 1, tid: 2, name: Signal Catcher  >>> com.hkmc.navi <<<" "    r0 00000000  r1 bea0e0a8" "backtrace:" "    #00  pc 0001b2c4  /system/lib/libc.so (abort+12)" "" "stack:" "         bea0e0a8  4d595353  ...HOMEWIFI" "         bea0e0ac  70617373  pass" "" "memory near r1:" "    bea0e0a0 4d595353 49445f31 00000000  SECRETSSID......" "    bea0e0b0 00000000 00000000 00000000  ................" "code around pc:" "    b6e4a000 e92d4ff0 e28db01c e24dd00c  .O-...." "imei 356938035643809 iccid 89820123456789012345" "b6e40000 b6e41000 b6e42000 LOOSEHEX" >> $DL/car/tomb/tombstone_00
+printf '%s\n' "Process: com.hkmc.x" "Subject: Input dispatching timed out a1:b2:c3:d4:e5:f6" "java.lang.IllegalStateException: device Kims Pixel not found" "BluetoothDevice 홍길동의 iPhone connected" "Abort message: 'Kims Pixel' /x" "keep '/system/lib/libc.so'" "  at android.bluetooth.BluetoothDevice.connect(BluetoothDevice.java:12)" "java.io.IOException: connect to Minsu-S23 failed" "Caused by: x: Minsu-S23 rejected" "mail kim@example.com" > "$DL/car/drop/system_app_anr@1763193301000.txt"
+printf '%s\n' "Process: com.y" "crash near 10.1.2.3" | gzip -c > "$DL/car/drop/data_app_crash@1763193302000.txt.gz"
+printf 'BIN\000\001OLDSECRET' | gzip -c > "$DL/car/drop/SYSTEM_TOMBSTONE@1763193303000.dat.gz"
+printf '%s\n' "OLDSECRET old" > "$DL/car/drop/system_app_crash@1762000000000.txt"
+printf '%s\n' one > "$DL/car/drop/x y@5.txt"; printf '%s\n' two > "$DL/car/drop/xy@5.txt"
+for f in telematics@6.txt mqtt_client@7.txt MOFGEN@8.txt log_03@9.txt TeleService@10.txt; do printf '%s\n' "TELEDATA $f" > "$DL/car/drop/$f"; touch -t 202611151655 "$DL/car/drop/$f"; done
+touch -t 202611151655 "$DL/car/drop/x y@5.txt" "$DL/car/drop/xy@5.txt" $DL/car/anr/traces.txt $DL/car/tomb/tombstone_00 $DL/car/drop/*@17631933*
+touch -t 202611101000 $DL/car/tomb/tombstone_01 $DL/car/drop/*@1762000000000.txt
+# 가짜 busybox: 받은 인자를 적고, df는 $DL/dfout이 있으면 그것을 낸다(없으면 실패). 그 밖은 PC 시험의 bb로
+printf '#!/bin/sh\necho "$*" >> %s/bbargs\nif [ "$1" = df ]; then [ -f %s/dfout ] && { cat %s/dfout; exit 0; }; exit 1; fi\nexec %s/bin/bb "$@"\n' $DL $DL $DL $T > $DL/bin/bbdl
+# 툴박스 df(busybox df가 안 될 때): $DL/tbdf가 있으면 그것을, 없으면 실패
+printf '#!/bin/sh\n[ -f %s/tbdf ] && { cat %s/tbdf; exit 0; }; exit 1\n' $DL $DL > $DL/bin/df
+# 가리기가 안 되는 busybox: KPMASK(keepip 함수가 든 프로그램)를 받으면 2로 끝난다
+printf '#!/bin/sh\nif [ "$1" = awk ]; then case "$*" in *keepip*) exit 2 ;; esac; fi\nexec %s/bin/bbdl "$@"\n' $DL > $DL/bin/bbnomask
+# 금지 명령: 불리면 기록만 남김(디버그 로그 켜고 끄기·서비스·로그 파이프·권한·마운트·토스트)
+for c in logcat setprop am svc hmgapid nemesis mount chmod chown kill killall pkill insmod ifconfig settings start stop; do printf '#!/bin/sh\necho "%s $*" >> %s/forbidden\n' $c $DL > $DL/bin/$c; done
+printf '#!/bin/sh\nif [ -f %s/fixdate ] && [ "$1" = "+%%Y%%m%%d-%%H%%M%%S" ]; then cat %s/fixdate; exit 0; fi\nexec /bin/date "$@"\n' $DL $DL > $DL/bin/date
+printf '#!/bin/sh\nif [ -f %s/lsiso ] && [ "$1" = -l ]; then echo "-rw------- system system 12 2026-11-14 23:30 ${2##*/}"; exit 0; fi\nexec /bin/ls "$@"\n' $DL > $DL/bin/ls
+chmod +x $DL/bin/*
+sed "s#^export PATH=.*#export PATH=$DL/bin:/usr/bin:/bin:/sbin#" $DLS > $DL/run.sh 2>/dev/null
+echo "/dev/block/sda1 $DL/usb vfat rw 0 0" > $DL/mounts
+dlr() { [ "$DLKEEP" = 1 ] || rm -rf $DL/usb/KoreaProjection-private; (U=$DL/usb W=$DL/car/w APLOG=$DL/car/ap/ap.log ANR=$DL/car/anr TOMB=$DL/car/tomb DROPBOX=$DL/car/drop DL_DAYS=2026-11-15 BB=${DLBB:-$DL/bin/bbdl} MOUNTS=$DL/mounts sh $DL/run.sh) > $DL/out 2>&1; DLRC=$?; DLO=$(ls -d $DL/usb/KoreaProjection-private/debuglog-* 2>/dev/null | tail -1); DLM=$DLO/0-summary.txt; }
+# 차 쪽 폴더의 모든 파일(이름·크기·바꾼 시각·권한)과 내용 md5. 실행 앞뒤가 같아야 한다
+dlsnap() { (cd $DL/car && find . | sort | while read -r f; do ls -ldT "$f" | awk '{ $2 = ""; print }'; [ -f "$f" ] && md5 -q "$f"; done); }
+dlsnap > $DL/snap0
+printf '%s\n' "Filesystem           1K-blocks      Used Available Use% Mounted on" "/dev/block/vold/8:1    7812500    100000   7712500   1% $DL/usb" > $DL/dfout
+: > $DL/before; /bin/sleep 1; dlr
+check "1.7.4 디버그 로그 USB: umask 077이 맨 앞, 셸 문법(sh·ksh 계열), 종료 0·출력 없음, 요약 첫 줄이 'GitHub에 올리지 마세요' 안내, 마지막 줄 '끝'" '[ -f $DLS ] && [ "$(sed -n 2p $DLS)" = "umask 077" ] && sh -n $DLS && (for KSH in $KSHS; do $KSH -n $DLS || exit 1; done) && [ $DLRC = 0 ] && [ ! -s $DL/out ] && head -1 $DLM | grep -q "^이 폴더는 GitHub 이슈에 올리지 마세요\." && [ "$(tail -1 $DLM)" = "- 끝: 다 마쳤습니다." ]'
+check "  디버그 로그 USB: cp.log.3·.2·.1·cp.log와 perf.log·perf.log.1을 바이트까지 그대로 복사(KoreaProjection-private/debuglog-<날짜시각>/)" '(case "${DLO##*/}" in debuglog-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]) ;; *) exit 1 ;; esac && for f in cp.log.3 cp.log.2 cp.log.1 cp.log perf.log perf.log.1; do cmp -s $DL/car/w/$f $DLO/$f || exit 1; done)'
+check "  디버그 로그 USB: ap.log·ap.log.1은 KPMASK로 가려서 씀(IP·MAC·이름 없음, 연결 줄은 남음)" '[ -s $DLO/ap.log ] && [ -s $DLO/ap.log.1 ] && grep -q "카플레이 연결 1" $DLO/ap.log && grep -q "x.x.x.x" $DLO/ap.log && ! grep -q -e 10.1.2.3 -e "a1:b2" -e 홍길동 $DLO/ap.log'
+check "  디버그 로그 USB: 요약에 cp.log마다 크기와 첫 줄·끝 줄 시각(멈춘 구간이 들었는지), 디버그 로그 켜짐, 빈 공간" 'grep -q "^- cp.log.3: $(wc -c < $DL/car/w/cp.log.3 | tr -d " ")바이트, 첫 줄 11-15 15:34:10, 끝 줄 11-15 15:40:00$" $DLM && grep -q "^- cp.log.1: [0-9]*바이트, 첫 줄 11-15 16:41:00, 끝 줄 11-15 16:53:30$" $DLM && grep -q "^- cp.log: [0-9]*바이트, 첫 줄 11-15 17:04:00, 끝 줄 11-15 17:08:12$" $DLM && grep -q "^- 디버그 로그 설정: 켜짐" $DLM && grep -q "^- USB 빈 공간: 7712500KB" $DLM && grep -q "^- 내비에서 바꾼 것: 없음" $DLM'
+check "  디버그 로그 USB: ANR 파일은 가려서 내용까지, tombstone·dropbox는 11-15 것만 가려서 내용(.txt.gz는 풀어서), 다른 날·글이 아닌 파일은 목록만" '[ -s $DLO/anr/traces.txt ] && grep -q "^thread main prio=5 tid=1 MONITOR$" $DLO/anr/traces.txt && grep -q "^\[가림: 이름이 있을 수 있는 줄\]$" $DLO/anr/traces.txt && [ -s $DLO/tombstones/tombstone_00.txt ] && grep -q "^pid: 321, tid: 322, thread: Binder_1  >>> /system/bin/mediaserver <<<$" $DLO/tombstones/tombstone_00.txt && grep -q "01x-xxxx-xxxx" $DLO/tombstones/tombstone_00.txt && [ ! -e $DLO/tombstones/tombstone_01.txt ] && [ -s "$DLO/dropbox/system_app_anr@1763193301000.txt" ] && grep -q "crash near x.x.x.x" "$DLO/dropbox/data_app_crash@1763193302000.txt" && [ "$(ls $DLO/dropbox | wc -l | tr -d " ")" = 4 ] && [ "$(cat $DLO/dropbox/xy@5.txt $DLO/dropbox/*-xy@5.txt | sort | tr "\n" " ")" = "one two " ] && grep -q "^- tombstone_01: [0-9]*바이트, 2026-11-10 10:00 (목록만: 날짜가 다름)$" $DLM && grep -q "^- SYSTEM_TOMBSTONE@1763193303000.dat.gz: [0-9]*바이트, 2026-11-15 16:55 (목록만: 글 파일이 아님)$" $DLM && grep -q "^- tombstone_00: [0-9]*바이트, 2026-11-15 16:55 → tombstones/tombstone_00.txt(가려서 씀)$" $DLM'
+DLDB="$DLO/dropbox/system_app_anr@1763193301000.txt"
+check "  디버그 로그 USB(리뷰 H2): 원본의 예외 메시지·한글 이름·작은따옴표 안을 가리고, 스택 줄·경로는 남김" 'grep -q "^java.lang.IllegalStateException: device \[이하 가림\]$" "$DLDB" && grep -q "^\[가림: 이름이 있을 수 있는 줄\]$" "$DLDB" && grep -q "^Abort message: .\[가림\]. /x$" "$DLDB" && grep -q "^keep ./system/lib/libc.so.$" "$DLDB" && grep -q "^  at android.bluetooth.BluetoothDevice.connect(BluetoothDevice.java:12)$" "$DLDB" && grep -q "^java.io.IOException: \[이하 가림\]$" "$DLDB" && grep -q "^Caused by: \[이하 가림\]$" "$DLDB" && grep -q "^mail \[가림: 메일\]$" "$DLDB" && grep -q "^pid: 1, tid: 2, thread: \[가림\]  >>> com.hkmc.navi <<<$" $DLO/tombstones/tombstone_00.txt'
+DLTB=$DLO/tombstones/tombstone_00.txt
+check "  디버그 로그 USB(오케스트레이터 리뷰 M1·L7): tombstone의 메모리 덤프 구역(stack·memory near·code around)과 16진 줄은 '[가림: 메모리 덤프 N줄]'로 버리고, 레지스터·backtrace는 남김, 14자리 이상 숫자열 가림" 'grep -q "^    r0 00000000  r1 bea0e0a8$" $DLTB && grep -q "^    #00  pc 0001b2c4  /system/lib/libc.so (abort+12)$" $DLTB && grep -q "^stack:$" $DLTB && grep -q "^\[가림: 메모리 덤프 2줄\]$" $DLTB && grep -q "^memory near r1:$" $DLTB && grep -q "^code around pc:$" $DLTB && [ "$(grep -c "^\[가림: 메모리 덤프 [12]줄\]$" $DLTB)" = 4 ] && grep -q "^imei \[가림: 번호\] iccid \[가림: 번호\]$" $DLTB && ! grep -q -e HOMEWIFI -e SECRETSSID -e 4d595353 -e 356938035643809 -e LOOSEHEX $DLTB'
+check "  디버그 로그 USB(오케스트레이터 리뷰 M2): 1단계가 끝나면 '디버그 로그는 다 꺼냈습니다'를 멈춤 원인 자료보다 먼저, 2단계는 ANR부터" '[ "$(grep -n "^- 디버그 로그는 다 꺼냈습니다" $DLM | cut -d: -f1)" -lt "$(grep -n "^### /data/anr$" $DLM | cut -d: -f1)" ] && [ "$(grep -n "^### /data/anr$" $DLM | cut -d: -f1)" -lt "$(grep -n "^### /data/tombstones$" $DLM | cut -d: -f1)" ]'
+check "  디버그 로그 USB(차 확인 11-16): dropbox의 차량 통신 기록(telematics·mqtt·mofgen·log_NN·TeleService)은 날짜가 맞아도 목록만" '[ "$(grep -c "(목록만: 차량 통신 기록)$" $DLM)" = 5 ] && grep -q "^- log_03@9.txt: [0-9]*바이트, 2026-11-15 16:55 (목록만: 차량 통신 기록)$" $DLM && ! grep -r -q TELEDATA $DLO'
+check "  디버그 로그 USB: 심은 폰 이름·MAC·IP·전화번호·다른 날 내용(OLDSECRET)이 USB 사본 어디에도 없음" '[ -n "$DLO" ] && ! grep -r -q -e "Johns" -e "a1:b2:c3" -e "10.1.2.3" -e "010-1234" -e 홍길동 -e OLDSECRET -e Kims -e Pixel -e Minsu -e kim@ -e "Signal Catcher" -e HOMEWIFI -e SECRETSSID -e 356938035643809 $DLO'
+dlsnap > $DL/snap1
+check "  디버그 로그 USB: 차 쪽 파일이 하나도 안 바뀜(이름·크기·시각·권한·내용), 시험 폴더 전체에서 새로 생긴 파일은 USB 사본과 시험 기록뿐, 금지 명령(logcat·setprop·am·svc·hmgapid·chmod·mount·kill 등)을 부르지 않음" 'cmp -s $DL/snap0 $DL/snap1 && [ "$(find $T -newer $DL/before -type f ! -name bbargs ! -name out ! -name "snap?" ! -path "$DL/usb/KoreaProjection-private/*" | wc -l | tr -d " ")" = 0 ] && [ ! -f $DL/forbidden ]'
+check "  디버그 로그 USB(소스): KPMASK가 패키지 hotspot.sh와 글자까지 같음" '[ "$(sed -n "/^KPMASK=/,/^}.\$/p" $DLS | wc -l | tr -d " ")" -ge 140 ] && [ "$(sed -n "/^KPMASK=/,/^}.\$/p" $DLS)" = "$(sed -n "/^KPMASK=/,/^}.\$/p" $PKG/svc/hotspot.sh)" ]'
+check "  디버그 로그 USB(소스): /data·/system에 쓰지 않고, 디버그 설정 파일·서비스를 건드리지 않고, 뒤에서 도는 작업·끝없는 반복·토스트가 없고, tail·head·cut·tr·sed를 부르지 않음" '[ -f $DLS ] && ! grep -v "^ *#" $DLS | grep -q -E ">[> ]*/(data|system)|>[> ]*\"?\\\$(W|APLOG|ANR|TOMB|DROPBOX)" && ! grep -v "^ *#" $DLS | grep -q -E "(^|[^&])&( |$)|while (:|true)|toast|logcat|setprop|hmgapid|rm .*\\\$(W|APLOG|ANR|TOMB|DROPBOX)|(^|[|;(] *|\\\$\\(|\\\$BB )(tail|head|cut|tr|sed) "'
+# 파일이 하나도 없을 때(디버그 로그를 켠 적이 없고, ANR·tombstone·dropbox 폴더도 없음)
+mv $DL/car $DL/car.full; mkdir -p $DL/car/w; dlr
+check "  디버그 로그 USB: 파일이 없으면 요약에 '없음'·'디버그 로그 설정: 꺼짐'만 적고 0으로 끝남(오류 출력 없음)" '[ $DLRC = 0 ] && [ ! -s $DL/out ] && grep -q "^- cp.log.3: 없음$" $DLM && grep -q "^- cp.log: 없음$" $DLM && grep -q "^- ap.log: 없음$" $DLM && grep -q "^- perf.log: 없음$" $DLM && grep -q "^- 디버그 로그 설정: 꺼짐" $DLM && grep -q "^- /data/anr: 없음 또는 읽을 수 없음$" $DLM && grep -q "^- /data/tombstones: 없음 또는 읽을 수 없음$" $DLM && [ "$(tail -1 $DLM)" = "- 끝: 다 마쳤습니다." ] && [ "$(ls $DLO)" = 0-summary.txt ]'
+rm -rf $DL/car; mv $DL/car.full $DL/car
+# USB 빈 공간이 모자랄 때: 쓰기 전에 멈추고 요약만
+printf '%s\n' "Filesystem           1K-blocks      Used Available Use% Mounted on" "/dev/block/vold/8:1    7812500    7812400   100   99% $DL/usb" > $DL/dfout; dlr
+check "  디버그 로그 USB: USB 빈 공간이 모자라면 아무것도 복사하지 않고 요약에 필요한 크기와 남은 공간을 적고 끝남" '[ $DLRC = 0 ] && [ ! -s $DL/out ] && [ "$(ls $DLO)" = 0-summary.txt ] && grep -q "^- USB 빈 공간이 모자라 복사하지 않았습니다(필요 약 [0-9]*KB, 남은 100KB)\. 빈 공간이 넉넉한 USB로 다시 해 주세요\.$" $DLM && grep -q "^- cp.log.3: [0-9]*바이트$" $DLM && [ "$(tail -1 $DLM)" = "- 끝: USB 빈 공간이 모자라 멈췄습니다." ]'
+# busybox df가 안 되면 툴박스 df(7.4G 꼴)로 본다. 툴박스로 봐도 모자라면 같은 멈춤
+rm -f $DL/dfout; printf '%s\n' "Filesystem             Size   Used   Free   Blksize" "$DL/usb     7.4G   1.2G   6.2G   32768" > $DL/tbdf; dlr; DLT1=$(grep "^- USB 빈 공간" $DLM)
+printf '%s\n' "Filesystem             Size   Used   Free   Blksize" "$DL/usb     7.4G   7.4G   512K   32768" > $DL/tbdf; dlr; DLT2=$(grep -c "^- USB 빈 공간이 모자라" $DLM)
+rm -f $DL/tbdf; dlr; DLT3=$(grep "^- USB 빈 공간" $DLM); DLT3C=$(ls $DLO | grep -c "^cp.log")
+check "  디버그 로그 USB: busybox df가 안 되면 툴박스 df의 Free(6.2G → 6501171KB)를 쓰고, 512K면 멈춤, 둘 다 안 되면 '확인 못 함'으로 적고 복사는 함" '[ "$DLT1" = "- USB 빈 공간: 6501171KB" ] && [ "$DLT2" = 1 ] && [ "$DLT3" = "- USB 빈 공간: 확인 못 함(그대로 복사함)" ] && [ "$DLT3C" = 4 ]'
+printf '%s\n' "Filesystem           1K-blocks      Used Available Use% Mounted on" "/dev/block/vold/8:1    7812500    100000   7712500   1% $DL/usb" > $DL/dfout
+# 가리기가 안 될 때: 가려야 하는 파일(ap.log·ANR·tombstone·dropbox)은 목록만, 이미 가려진 cp.log와 숫자뿐인 perf.log는 복사
+DLBB=$DL/bin/bbnomask dlr
+check "  디버그 로그 USB: 가리기(KPMASK)가 안 되면 ap.log·ANR·tombstone·dropbox는 목록만 남기고(사본 없음), cp.log·perf.log는 그대로 복사, 심은 값 없음" '[ $DLRC = 0 ] && [ ! -s $DL/out ] && grep -q "^- 가리기(KPMASK): 안 됨" $DLM && [ ! -e $DLO/ap.log ] && [ ! -e $DLO/anr ] && [ ! -e $DLO/tombstones ] && [ ! -e $DLO/dropbox ] && cmp -s $DL/car/w/cp.log $DLO/cp.log && cmp -s $DL/car/w/perf.log $DLO/perf.log && grep -q "^- ap.log: [0-9]*바이트 (목록만: 가리기가 안 됨)$" $DLM && grep -q "^- traces.txt: [0-9]*바이트, 2026-11-15 16:55 (목록만: 가리기가 안 됨)$" $DLM && [ -n "$DLO" ] && ! grep -r -q -e "Johns" -e "a1:b2:c3" -e "10.1.2.3" -e "010-1234" -e 홍길동 -e OLDSECRET -e Kims -e Pixel -e Minsu -e kim@ -e "Signal Catcher" -e HOMEWIFI -e SECRETSSID -e 356938035643809 $DLO'
+# busybox가 없을 때: 아무것도 복사하지 않고 요약만
+rm -rf $DL/usb/KoreaProjection-private; (U=$DL/usb W=$DL/car/w APLOG=$DL/car/ap/ap.log ANR=$DL/car/anr TOMB=$DL/car/tomb DROPBOX=$DL/car/drop BB= BB_SYS=$DL/none BB_OWN=$DL/none MOUNTS=$DL/mounts sh $DL/run.sh) > $DL/out 2>&1; DLRC=$?; DLO=$(ls -d $DL/usb/KoreaProjection-private/debuglog-* | tail -1); DLM=$DLO/0-summary.txt
+check "  디버그 로그 USB: busybox가 없으면 복사하지 않고 요약에 'busybox 없음'만" '[ $DLRC = 0 ] && [ ! -s $DL/out ] && [ "$(ls $DLO)" = 0-summary.txt ] && grep -q "^- busybox: 없음(아무것도 복사하지 않았습니다)$" $DLM && [ "$(tail -1 $DLM)" = "- 끝: busybox가 없어 멈췄습니다." ]'
+# USB가 마운트 표에 없으면(빈 마운트 지점) 아무것도 쓰지 않음, USB에 못 쓰면 조용히 끝남
+rm -rf $DL/usb; mkdir -p $DL/usb; : > $DL/mounts; dlr; DLN1=$(ls -A $DL/usb | wc -l | tr -d " "); DLN1R=$DLRC
+echo "/dev/block/sda1 $DL/usb vfat rw 0 0" > $DL/mounts; chmod 500 $DL/usb; dlr; chmod 700 $DL/usb
+check "  디버그 로그 USB: 넘긴 U가 마운트 표에 없으면 아무것도 쓰지 않고, USB에 쓰지 못하면 출력 없이 0으로 끝남" '[ $DLN1R = 0 ] && [ "$DLN1" = 0 ] && [ $DLRC = 0 ] && [ ! -s $DL/out ] && [ -z "$(ls -A $DL/usb)" ]'
+# 같은 초에 두 번 돌려도 앞 결과를 덮지 않음(폴더 이름이 겹치면 -2)
+echo 20261115-170000 > $DL/fixdate; dlr; DLKEEP=1; dlr; dlr; DLKEEP=; rm -f $DL/fixdate
+check "  디버그 로그 USB: 결과 폴더가 이미 있으면 덮지 않고 새 폴더(같은 초면 -2), 그것도 있으면 쓰지 않음" '[ "$(ls $DL/usb/KoreaProjection-private | tr "\n" " ")" = "debuglog-20261115-170000 debuglog-20261115-170000-2 " ] && [ $DLRC = 0 ] && (for d in $DL/usb/KoreaProjection-private/debuglog-*; do [ -f $d/0-summary.txt ] || exit 1; done)'
+# 진짜 busybox(ARM 컨테이너, 1.36.1)로: 차 쪽 폴더는 읽기 전용으로 붙인다(쓰려 하면 실패). df·date -r·awk(KPMASK)·gunzip이 그대로 되는가.
+# 이미지 조회가 가끔 "No such image"를 내므로, 안 되면 한 번 실행해 깨운다(받지 않음: --pull never)
+if command -v docker >/dev/null 2>&1 && { docker image inspect --platform linux/arm/v7 alpine:3.20 >/dev/null 2>&1 || docker run --rm --pull never --platform linux/arm/v7 alpine:3.20 true >/dev/null 2>&1; }; then
+  rm -rf $DL/rc $DL/ru; cp -Rp $DL/car $DL/rc; mkdir -p $DL/ru
+  sed "s#^export PATH=.*#export PATH=/bin:/usr/bin:/sbin#" $DLS > $DL/run-real.sh
+  docker run --rm --pull never --platform linux/arm/v7 -e TZ=KST-9 -v $DL/rc:/c:ro -v $DL/ru:/u -v $B/vendor/busybox:/vb:ro -v $DL/run-real.sh:/t/run.sh:ro alpine:3.20 \
+    /vb/busybox sh -c 'echo "/dev/x /u vfat rw 0 0" > /tmp/m; U=/u W=/c/w APLOG=/c/ap/ap.log ANR=/c/anr TOMB=/c/tomb DROPBOX=/c/drop DL_DAYS=2026-11-15 BB=/vb/busybox MOUNTS=/tmp/m /vb/busybox sh /t/run.sh; echo "rc=$?"' > $DL/real.out 2>&1
+  DLRO=$(ls -d $DL/ru/KoreaProjection-private/debuglog-* 2>/dev/null | tail -1); DLRM=$DLRO/0-summary.txt
+  check "  디버그 로그 USB(진짜 busybox ARM): 출력 없이 0, cp.log·perf.log 그대로, df 빈 공간이 숫자, 가리기 됨, 시각(date -r)으로 11-15 것만 내용, .txt.gz도 풀어 가림, 심은 값 없음, 끝까지 감" '[ "$(cat $DL/real.out)" = "rc=0" ] && [ -n "$DLRO" ] && (for f in cp.log.3 cp.log perf.log; do cmp -s $DL/car/w/$f $DLRO/$f || exit 1; done) && grep -q "^- USB 빈 공간: [0-9][0-9]*KB$" $DLRM && grep -q "^- 가리기(KPMASK): 됨$" $DLRM && grep -q "^- cp.log.1: [0-9]*바이트, 첫 줄 11-15 16:41:00, 끝 줄 11-15 16:53:30$" $DLRM && grep -q "^- tombstone_00: [0-9]*바이트, 2026-11-15 16:55 → tombstones/tombstone_00.txt(가려서 씀)$" $DLRM && grep -q "^- tombstone_01: [0-9]*바이트, 2026-11-10 10:00 (목록만: 날짜가 다름)$" $DLRM && grep -q "crash near x.x.x.x" "$DLRO/dropbox/data_app_crash@1763193302000.txt" && grep -q "^thread main prio=5 tid=1 MONITOR$" $DLRO/anr/traces.txt && grep -q "^Abort message: .\[가림\]. /x$" "$DLRO/dropbox/system_app_anr@1763193301000.txt" && ! grep -r -q -e "Johns" -e "a1:b2:c3" -e "10.1.2.3" -e "010-1234" -e 홍길동 -e OLDSECRET $DLRO && [ "$(tail -1 $DLRM)" = "- 끝: 다 마쳤습니다." ]'
+else
+  echo "skip 디버그 로그 USB 진짜 busybox 확인(Docker 또는 alpine:3.20 arm/v7 이미지 없음)"
+fi
+# 리뷰 반영 시험들. 차 폴더는 사본($DL/c2)으로 돌린다(로그 밀기를 흉내 내야 해서)
+dlr2() { [ "$DLKEEP" = 1 ] || rm -rf $DL/usb/KoreaProjection-private; (U=$DL/usb W=$DL/c2/w APLOG=$DL/c2/ap/ap.log ANR=$DL/c2/anr TOMB=$DL/c2/tomb DROPBOX=$DL/c2/drop DL_DAYS=2026-11-15 BB=${DLBB:-$DL/bin/bbdl} MOUNTS=$DL/mounts env $DLENV sh $DL/run.sh) > $DL/out 2>&1; DLRC=$?; DLO=$(ls -d $DL/usb/KoreaProjection-private/debuglog-* 2>/dev/null | tail -1); DLM=$DLO/0-summary.txt; }
+dlc2() { rm -rf $DL/c2; cp -Rp $DL/car $DL/c2; }
+# H1: 1단계 마지막 복사(perf.log.1) 때 USB를 뺌(마운트 표에서 지우고 USB 내용이 사라짐) → 2단계는 아무것도 만들지 않고 끝남
+printf '#!/bin/sh\nif [ "$1" = cat ]; then case "$2" in *perf.log.1) : > %s/mounts; rm -rf %s/usb/KoreaProjection-private ;; esac; fi\nexec %s/bin/bbdl "$@"\n' $DL $DL $DL > $DL/bin/bbpull; chmod +x $DL/bin/bbpull
+dlc2; DLBB=$DL/bin/bbpull dlr2; echo "/dev/block/sda1 $DL/usb vfat rw 0 0" > $DL/mounts
+check "  디버그 로그 USB(리뷰 H1): 도중에 USB를 빼면 그 뒤로 아무 폴더·파일도 만들지 않고(빈 마운트 지점에 안 씀) 출력 없이 0으로 끝남" '[ $DLRC = 0 ] && [ ! -s $DL/out ] && [ -z "$(ls -A $DL/usb)" ]'
+# M1: cp.log를 읽기 직전에 패키지의 logrotate처럼 밀기(.2→.3, .1→.2, cp.log→.1). 읽는 도중 cp.log 비우기는 흉내 내지 않는다(PC에서 확인 안 함)
+printf '#!/bin/sh\nif [ "$1" = cat ] && [ "$2" = %s/c2/w/cp.log ] && [ ! -f %s/rotated ]; then : > %s/rotated; W=%s/c2/w; mv -f $W/cp.log.2 $W/cp.log.3; mv -f $W/cp.log.1 $W/cp.log.2; cp -f $W/cp.log $W/cp.log.1; fi\nexec %s/bin/bbdl "$@"\n' $DL $DL $DL $DL $DL > $DL/bin/bbrot; chmod +x $DL/bin/bbrot
+dlc2; rm -f $DL/rotated; DLBB=$DL/bin/bbrot dlr2
+check "  디버그 로그 USB(리뷰 M1): 새것(cp.log)부터 복사하고, 도중에 로그가 밀리면 요약에 '로그가 밀렸습니다'를 적음(가장 새 조각은 온전)" '[ -f $DL/rotated ] && cmp -s $DL/car/w/cp.log $DLO/cp.log && grep -q "^- 복사하는 동안 로그가 밀렸습니다" $DLM && [ "$(grep -n "^- cp.log: " $DLM | cut -d: -f1)" -lt "$(grep -n "^- cp.log.3: " $DLM | cut -d: -f1)" ]'
+dlc2; dlr2
+check "  디버그 로그 USB(리뷰 M1): 밀리지 않으면 그 줄이 없음" '[ -n "$DLO" ] && ! grep -q "로그가 밀렸습니다" $DLM'
+# M2: 파일 하나 상한(MASKMAX, 압축은 1/10), 전체 상한(RAWMAX)
+dlc2; DLENV="MASKMAX=130 RAWMAX=1000000" dlr2; DLENV=
+check "  디버그 로그 USB(리뷰 M2): 상한(MASKMAX)을 넘는 원본은 목록만('너무 큼'), 압축 파일은 상한의 1/10로 봄" 'grep -q "^- traces.txt: [0-9]*바이트, 2026-11-15 16:55 (목록만: 너무 큼)$" $DLM && grep -q "^- data_app_crash@1763193302000.txt.gz: [0-9]*바이트, 2026-11-15 16:55 (목록만: 너무 큼)$" $DLM && grep -q "^- xy@5.txt: .*(가려서 씀)$" $DLM'
+dlc2; DLENV="RAWMAX=700" dlr2; DLENV=
+DLMB=$(grep "^- data_app_crash@1763193302000.txt.gz: " $DLM)
+check "  디버그 로그 USB(재리뷰 M-b): 전체 상한은 압축 파일을 풀린 크기(10배)로 셈" 'case "$DLMB" in *"(목록만: 전체 상한)") ;; *) exit 1 ;; esac'
+dlc2; DLENV="RAWMAX=200" dlr2; DLENV=
+check "  디버그 로그 USB(리뷰 M2): 전체 상한(RAWMAX)을 넘으면 그 뒤 원본은 목록만('전체 상한')" 'grep -q "^- traces.txt: .*(가려서 씀)$" $DLM && grep -q "^- tombstone_00: .*(목록만: 전체 상한)$" $DLM && [ "$(tail -1 $DLM)" = "- 끝: 다 마쳤습니다." ]'
+# L5: 압축이 깨진 .txt.gz → 앞부분만 가려서 썼다고 적음
+dlc2; printf 'Process: z\n' | gzip -c | head -c 20 > "$DL/c2/drop/bad_crash@1763193309000.txt.gz"; touch -t 202611151655 "$DL/c2/drop/bad_crash@1763193309000.txt.gz"; dlr2
+check "  디버그 로그 USB(리뷰 L5): 압축을 다 풀지 못하면 '앞부분만 가려서 씀'으로 적고 사본 끝에 표시 줄" 'grep -q "^- bad_crash@1763193309000.txt.gz: .*→ dropbox/bad_crash@1763193309000.txt(압축을 다 풀지 못해 앞부분만 가려서 씀)$" $DLM && grep -q "^(gunzip failed: cut here)$" "$DLO/dropbox/bad_crash@1763193309000.txt" && [ "$(grep -c "gunzip failed" "$DLO/dropbox/bad_crash@1763193309000.txt")" = 1 ]'
+# L1: 툴박스 ls -l의 ISO 시각을 busybox date -r보다 먼저 씀(안드로이드 시간대). 가짜 ls가 2026-11-14 23:30을 내면 11-15 것이 아님
+dlc2; : > $DL/lsiso; dlr2; rm -f $DL/lsiso
+check "  디버그 로그 USB(리뷰 L1): 파일 시각은 툴박스 ls -l(YYYY-MM-DD HH:MM)을 먼저 씀" 'grep -q "^- tombstone_00: [0-9]*바이트, 2026-11-14 23:30 (목록만: 날짜가 다름)$" $DLM && [ ! -e $DLO/tombstones ]'
+# L2: 옛 툴박스 df 꼴("…: 7.4G total, 1.2G used, 6.2G available (block size 32768)")
+dlc2; rm -f $DL/dfout; echo "$DL/usb: 7.4G total, 1.2G used, 6.2G available (block size 32768)" > $DL/tbdf; dlr2; DLL2=$(grep "^- USB 빈 공간" $DLM)
+echo "$DL/usb: 7.4G total, 7.4G used, 300K available (block size 32768)" > $DL/tbdf; dlr2; DLL2B=$(tail -1 $DLM); rm -f $DL/tbdf
+printf '%s\n' "Filesystem           1K-blocks      Used Available Use% Mounted on" "/dev/block/vold/8:1    7812500    100000   7712500   1% $DL/usb" > $DL/dfout
+check "  디버그 로그 USB(리뷰 L2): 옛 툴박스 df 꼴의 available도 읽음(6.2G → 6501171KB, 300K면 멈춤)" '[ "$DLL2" = "- USB 빈 공간: 6501171KB" ] && [ "$DLL2B" = "- 끝: USB 빈 공간이 모자라 멈췄습니다." ]'
+rm -rf $DL/c2
+# 오케스트레이터 리뷰 L1: 앞쪽 awk가 아무것도 내지 않으면(원본은 있음) 사본을 남기지 않고 "쓰지 못함"
+# (가리기 자가 점검이 RAWMASK를 세 번 부르므로 넷째부터 비운다)
+printf '#!/bin/sh\nif [ "$1" = awk ]; then case "$2" in *dumpend*) echo x >> %s/rmcount; [ "$(wc -l < %s/rmcount)" -gt 3 ] && { cat > /dev/null; exit 0; } ;; esac; fi\nexec %s/bin/bbdl "$@"\n' $DL $DL $DL > $DL/bin/bbempty; chmod +x $DL/bin/bbempty
+dlc2; rm -f $DL/rmcount; DLBB=$DL/bin/bbempty dlr2
+check "  디버그 로그 USB(오케스트레이터 리뷰 L1): 원본에 내용이 있는데 가린 사본이 비면 사본을 지우고 '쓰지 못함'" 'grep -q "^- traces.txt: [0-9]*바이트, 2026-11-15 16:55 (쓰지 못함)$" $DLM && [ ! -e $DLO/anr/traces.txt ]'
+# 오케스트레이터 리뷰 H1: 차의 셸(mksh)·툴박스에는 printf가 없다. printf가 없는 PATH와 mksh로 돌려도 가리기 자가 점검이 통과해야 한다.
+# 가짜 busybox(bbpf)는 자기 PATH에서 printf를 찾는다(진짜 busybox에는 printf가 들어 있음)
+mkdir -p $DL/nopf; for c in awk gunzip wc grep cat sort; do ln -sf "$(command -v $c)" $DL/nopf/$c; done
+printf '#!/bin/sh\nPATH=/usr/bin:/bin; export PATH\nexec %s/bin/bbdl "$@"\n' $DL > $DL/bin/bbpf; chmod +x $DL/bin/bbpf
+sed "s#^export PATH=.*#export PATH=$DL/bin:$DL/nopf:/bin#" $DLS > $DL/run-nopf.sh
+DLMK=$(command -v mksh)
+if [ -n "$DLMK" ]; then
+  dlc2; rm -rf $DL/usb/KoreaProjection-private
+  (U=$DL/usb W=$DL/c2/w APLOG=$DL/c2/ap/ap.log ANR=$DL/c2/anr TOMB=$DL/c2/tomb DROPBOX=$DL/c2/drop DL_DAYS=2026-11-15 BB=$DL/bin/bbpf MOUNTS=$DL/mounts $DLMK $DL/run-nopf.sh) > $DL/out 2>&1; DLRC=$?
+  DLO=$(ls -d $DL/usb/KoreaProjection-private/debuglog-* 2>/dev/null | tail -1); DLM=$DLO/0-summary.txt
+  check "  디버그 로그 USB(오케스트레이터 리뷰 H1): printf가 없는 PATH와 mksh로 돌려도 가리기 자가 점검이 '됨'이고 ap.log·ANR을 가려서 씀" '! $DLMK -c "PATH=$DL/bin:$DL/nopf:/bin; command -v printf" >/dev/null 2>&1 && [ $DLRC = 0 ] && [ ! -s $DL/out ] && grep -q "^- 가리기(KPMASK): 됨$" $DLM && [ -s $DLO/ap.log ] && [ -s $DLO/anr/traces.txt ]'
+else
+  bad "  디버그 로그 USB(오케스트레이터 리뷰 H1): mksh가 없어 printf 없는 셸 시험을 못 함"
+fi
+rm -rf $DL/c2
+rm -rf $DG
+
+# --- 묶음 I ⑥: 서비스가 부팅마다 한 번 남기는 USB 장치 기록($BK/usb.seen). 포트가 하나뿐인 차의 "동글을 꽂고 시동 → 빼고 제보" 길 ---
+US=$T/us; mkdir -p $US/bk $US/drv/rtl88x2bu "$US/usb/1-1/1-1:1.0" $US/usb/1-2 $US/usb/1-3 $US/usb/usb1 "$US/usb/1-1:1.0" $US/usb/1-4
+for f in idVendor:0bda idProduct:b812 bDeviceClass:00 speed:480 serial:USSER11 product:Johns-Dongle manufacturer:Kim; do echo "${f#*:}" > $US/usb/1-1/${f%%:*}; done
+echo ff > "$US/usb/1-1/1-1:1.0/bInterfaceClass"; ln -s $US/drv/rtl88x2bu "$US/usb/1-1/1-1:1.0/driver"
+for f in idVendor:04e8 idProduct:6860 bDeviceClass:00 speed:480 serial:PHSER22; do echo "${f#*:}" > $US/usb/1-2/${f%%:*}; done
+for f in idVendor:05e3 idProduct:0608 bDeviceClass:09 speed:480; do echo "${f#*:}" > $US/usb/1-3/${f%%:*}; done
+for f in idVendor:1d6b idProduct:0002 bDeviceClass:09 speed:480; do echo "${f#*:}" > $US/usb/usb1/${f%%:*}; done
+for f in idVendor:abcd idProduct:ZZ99 bDeviceClass:00 speed:12; do echo "${f#*:}" > $US/usb/1-4/${f%%:*}; done
+usw() { echo "$1" > $US/bid; (HOTSPOT_LIB=1 BB=$T/bin/bb W=$US/w BK=$US/bk USB_SYS=${2:-$US/usb} BOOT_ID=$US/bid sh -c '. '$T'/app/svc/hotspot.sh; umask 077; usb_seen_write; echo "rc=$?"') > $US/out 2>&1; }
+usw aaaa1111-2222-3333-4444-555555555555
+check "묶음 I ⑥: usb.seen에 이번 부팅 장치(ID·인터페이스 class·드라이버·속도), 루트 허브·허브 빼고, 폰은 제품 ID 대신 phone, 이상한 제품 ID는 ?, 0600, 비밀값 없음" 'grep -qx "rc=0" $US/out && [ "$(cat $US/bk/usb.seen)" = "boot aaaa1111
+0bda:b812 if=ff drv=rtl88x2bu speed=480
+04e8:phone if=- drv=- speed=480
+abcd:? if=- drv=- speed=12" ] && [ "$(stat -f %Lp $US/bk/usb.seen)" = 600 ] && ! grep -q -e USSER11 -e Johns -e Kim -e PHSER22 -e 6860 -e 05e3 -e 1d6b $US/bk/usb.seen && [ ! -e $US/bk/usb.seen.tmp ]'
+cp $US/bk/usb.seen $US/seen1; rm -rf $US/usb/1-4; usw aaaa1111-2222-3333-4444-555555555555
+check "  묶음 I ⑥: 같은 부팅에 서비스가 다시 시작해도 다시 쓰지 않음(부팅마다 한 번)" 'grep -qx "rc=0" $US/out && cmp -s $US/seen1 $US/bk/usb.seen'
+mkdir -p $US/none; usw bbbb2222-0; usw cccc3333-0 $US/none; usw dddd4444-0
+check "  묶음 I ⑥: 최근 3부팅 치만 남김(오래된 부팅부터), 장치가 없던 부팅은 none" '[ "$(grep -c "^boot " $US/bk/usb.seen)" = 3 ] && [ "$(sed -n 1p $US/bk/usb.seen)" = "boot bbbb2222" ] && ! grep -q aaaa1111 $US/bk/usb.seen && grep -A1 "^boot cccc3333$" $US/bk/usb.seen | grep -qx none && [ "$(tail -1 $US/bk/usb.seen | cut -c1-9)" = "04e8:phon" ]'
+mkdir -p $US/many; i=0; while [ $i -lt 25 ]; do i=$((i+1)); mkdir -p $US/many/2-$i; echo 0bda > $US/many/2-$i/idVendor; echo b812 > $US/many/2-$i/idProduct; echo 00 > $US/many/2-$i/bDeviceClass; echo 480 > $US/many/2-$i/speed; done; usw eeee5555-0 $US/many
+check "  묶음 I ⑥: 한 부팅에 장치는 20개까지, 파일은 3부팅·70줄 안" '[ "$(sed -n "/^boot eeee5555$/,\$p" $US/bk/usb.seen | grep -c "^0bda:b812 ")" = 20 ] && [ "$(wc -l < $US/bk/usb.seen | tr -d " ")" -le 70 ]'
+# 드라이버 이름: cd -P가 안 되는 셸이면 ls -l의 링크 대상, 그것도 안 되면 ?
+USD=$( (HOTSPOT_LIB=1 BB=$T/bin/bb W=$US/w BK=$US/bk sh -c '. '$T'/app/svc/hotspot.sh; L="'$US'/usb/1-1/1-1:1.0/driver"; us_drv $L; echo "a=$_ud"; pwd() { return 1; }; us_drv $L; echo "b=$_ud"; BB=false; us_drv $L; echo "c=$_ud"') 2>/dev/null | tr '\n' ' ')
+check "  묶음 I ⑥: 서비스의 드라이버 이름도 cd -P → ls -l → ? 순으로 내려감" '[ "$USD" = "a=rtl88x2bu b=rtl88x2bu c=? " ]'
+check "  묶음 I ⑥(소스): main이 부팅 완료를 기다린 뒤 usb_seen_write를 한 번 부르고, 30초 반복 안에서는 부르지 않음, 폰 목록이 리포트 dn_is_phone과 같음" '[ "$(grep -c "^  usb_seen_write$" $PKG/svc/hotspot.sh)" = 1 ] && awk "/sys.boot_completed\)\" != 1 \]; do sleep 2; done/{f=1} f&&/^  usb_seen_write\$/{print \"ok\"; exit}" $PKG/svc/hotspot.sh | grep -qx ok && ! awk "/^main\(\) \{/{m=1} m&&/^  while true; do\$/{f=1} f&&/^}/{exit} f" $PKG/svc/hotspot.sh | grep -q usb_seen_write && [ "$(sed -n "/^us_phone() /,/^}/p" $PKG/svc/hotspot.sh | sed -n 3p)" = "$(sed -n "/^dn_is_phone() /,/^}/p" $PKG/bin/status.sh | sed -n 3p)" ]'
+cp $US/bk/usb.seen $US/seen2; (HOTSPOT_LIB=1 BB=$T/bin/bb W=$US/w BK=$US/bk USB_SYS=$US/usb BOOT_ID=$US/nobid sh -c '. '$T'/app/svc/hotspot.sh; umask 077; usb_seen_write; echo "rc=$?"') > $US/out 2>&1
+check "  묶음 J 리뷰(낮음): 부팅 id를 못 읽으면 그 부팅은 남기지 않음(boot none으로 고착되지 않음)" 'grep -qx "rc=0" $US/out && cmp -s $US/seen2 $US/bk/usb.seen && ! grep -q "^boot none" $US/bk/usb.seen'
+# 리포트가 최근 3부팅 치를 보임(표시 붙음)
+(KPROC=$US/none KSYS=$US/none NAPPS=$US/none KMODDIRS=$US/none STOCK_HOSTAPD=$US/none USBSEEN=$US/bk/usb.seen; export KPROC KSYS NAPPS KMODDIRS STOCK_HOSTAPD USBSEEN; HMGLOG=$T/hlm STATUS=$STF BB=$T/bin/bb APP=$T/app SRC=$T/softap.conf W=$T/w sh $T/st.sh >/dev/null 2>&1); sed -n '/^## 동글 조사 정보/,/^## /p' $R > $US/sec.md
+check "  묶음 I ⑥: 리포트의 '지난 부팅들에 꽂혀 있던 USB 장치' 칸에 부팅 3개와 장치 줄, 드라이버 표 ID 표시" 'grep -q "^- 지난 부팅들에 꽂혀 있던 USB 장치(서비스 시작 때 기록, 허브 빼고, 오래된 부팅부터):$" $US/sec.md && [ "$(grep -c "^  - 부팅 [123]$" $US/sec.md)" = 3 ] && grep -q "^    - 0bda:b812 if=- drv=- speed=480 (RTL88x2BU 드라이버 표에 있는 ID)$" $US/sec.md && grep -q "^    - 꽂힌 장치 없음$" $US/sec.md && grep -q "^    - 04e8:phone if=- drv=- speed=480$" $US/sec.md'
+rm -rf $US
+
+# --- 1.7.4 B-4: 스토어 설명(NEMESIS.data). NEMESIS는 글자 수로 센다(meta.c utf8_chars): short-desc 64자, detailed-desc 256자 이하.
+# 값은 큰따옴표로 묶이므로 안에 큰따옴표가 없어야 한다. 1.7.3 흐름([지금 재부팅]·[제보 파일 만들기])과 1.7.2 이하 업데이트 순서를 담는다
+DESC=$(python3 - $PKG/NEMESIS.data <<'PYE'
+import re,sys
+s=open(sys.argv[1],encoding='utf-8').read()
+out=[]
+for k in ('short-desc','detailed-desc'):
+    m=re.search(r'^'+k+r'="([^"]*)"$',s,re.M)
+    out.append('%s=%d' % (k, len(m.group(1)) if m else -1))
+m=re.search(r'^detailed-desc="([^"]*)"$',s,re.M)
+d=m.group(1) if m else ''
+for w in ('[지금 재부팅]','[제보 파일 만들기]','삭제 → 재부팅 → 설치','1.7.2 이하'): out.append('has=%d' % (w in d))
+for w in ('Launch를 누른 후 설치','QR코드'): out.append('old=%d' % (w in d))
+print(' '.join(out))
+PYE
+)
+DSN=${DESC#short-desc=}; DSN=${DSN%% *}; DDN=${DESC#*detailed-desc=}; DDN=${DDN%% *}
+check "1.7.4 B-4: 스토어 설명 길이(글자 수) short-desc ${DSN}자 <= 64, detailed-desc ${DDN}자 <= 256" '[ "$DSN" -ge 1 ] && [ "$DSN" -le 64 ] && [ "$DDN" -ge 1 ] && [ "$DDN" -le 256 ]'
+check "  B-4: 긴 설명이 1.7.3 흐름([지금 재부팅]·[제보 파일 만들기])과 1.7.2 이하의 '삭제 → 재부팅 → 설치'를 담고, 옛 문구(Launch를 누른 후 설치·QR코드)는 없음" 'case "$DESC" in *"has=0"*|*"old=1"*) false ;; *) true ;; esac'
+check "  B-4: NEMESIS.data의 큰따옴표가 짝수(설명 안에 따옴표가 섞이지 않음), package-version은 숫자와 점만" '[ $(( $(tr -cd "\"" < $PKG/NEMESIS.data | wc -c) % 2 )) = 0 ] && grep -qx "package-version=[0-9.]*" $PKG/NEMESIS.data'
+
+# --- 1.7.4 B-15: 패키지·USB 스크립트가 grep에 넘기는 옵션은 차의 busybox 1.8.1 grep에서 확실한 것만(l n q v s c i H h e f L A B C E) ---
+# 리뷰 반영: grep 뒤 그 명령이 끝날 때(| ; & ) 줄 끝)까지의 모든 낱말에서 따옴표 밖 "-"로 시작하는 것을 본다(패턴 뒤 옵션·옵션 묶음도).
+# 한계: 변수로 넘기는 옵션($OPT)과 따옴표 안의 옵션은 보지 못한다
+cat > $T/g15.py <<'PYE'
+import re,sys
+ok=set('lnqvsciHhefLABCE0123456789')
+def scan(line):
+    out=[]
+    for m in re.finditer(r'(?<![\w-])grep\b', line):
+        rest=line[m.end():]
+        i=0; q=None; tok=''; toks=[]
+        while i < len(rest):
+            ch=rest[i]
+            if q:
+                if ch==q: q=None
+                tok+=ch
+            elif ch in '\'"': q=ch; tok+=ch
+            elif ch in ' \t\r\n': 
+                if tok: toks.append(tok); tok=''
+            elif ch in '|;&)`<>' : break
+            else: tok+=ch
+            i+=1
+        if tok: toks.append(tok)
+        for t in toks:
+            if t.startswith('--') and t!='--': out.append(t)
+            elif t.startswith('-') and t!='-' and not t[1:2].isdigit() and any(c not in ok for c in t[1:]): out.append(t)
+    return out
+n=0; bad=[]
+for f in sys.argv[1:]:
+    for i,l in enumerate(open(f,encoding='utf-8'),1):
+        if l.lstrip().startswith('#'): continue
+        r=scan(l); n+=len(re.findall(r'(?<![\w-])grep\b', l))
+        bad+=['%s:%d %s' % ('/'.join(f.split('/')[-2:]), i, o) for o in r]
+print(n, ' '.join(bad))
+PYE
+G15=$(python3 $T/g15.py $PKG/svc/hotspot.sh $PKG/bin/status.sh $PKG/bin/carreport.sh $PKG/scripts/post.sh $PKG/scripts/preun.sh $B/usb-*/NEMESIS*.sh)
+check "1.7.4 B-15: 패키지·USB 스크립트의 grep 옵션에 busybox 1.8.1에서 확실하지 않은 글자(-x·-w·-o 등)·긴 옵션이 없음(검사한 grep ${G15%% *}개)" '[ "${G15%% *}" -gt 100 ] && [ "$G15" = "${G15%% *} " ]'
+# 검사기가 헛돌지 않는지: 옵션 앞·패턴 뒤·묶음·긴 옵션을 심은 사본은 모두 잡혀야 함(따옴표 안의 -84 같은 패턴은 잡지 않음)
+mkdir -p $T/g15; printf '%s\n' "\$BB grep -qx 'aa=ok' \$HINT" "\$BB grep 'aa=ok' \$HINT -w" "\$BB grep -qvo x f | wc" "grep --line-buffered x f" "\$BB grep -i -E '(err)[ =:]*-84' f" > $T/g15/x.sh
+G15B=$(python3 $T/g15.py $T/g15/x.sh)
+check "  B-15: 검사기는 옵션 앞(-qx)·패턴 뒤(-w)·묶음(-qvo)·긴 옵션을 잡고, 따옴표 안 패턴(-84)은 잡지 않음(변이)" '[ "${G15B#* }" = "g15/x.sh:1 -qx g15/x.sh:2 -w g15/x.sh:3 -qvo g15/x.sh:4 --line-buffered" ]'
+rm -rf $T/g15 $T/g15.py
+# 가짜 bb의 grep 옵션 제한이 켜져 있음: -x는 2로 끝나고 아무것도 내지 않음
+echo aa=ok > $T/g15f; G15C=$($T/bin/bb grep -qx aa=ok $T/g15f; echo "rc=$?"); G15D=$($T/bin/bb grep -q aa=ok $T/g15f; echo "rc=$?"); G15E=$($T/bin/bb grep -qw aa=ok $T/g15f; echo "rc=$?"); rm -f $T/g15f
+check "  B-15: 시험의 가짜 bb는 1.8.1에서 확실하지 않은 grep 옵션(-x·-w)을 거절(rc 2), 있는 옵션(-q)은 그대로" '[ "$G15C" = "rc=2" ] && [ "$G15E" = "rc=2" ] && [ "$G15D" = "rc=0" ]'
+
+# --- 1.7.4 B-14: 패키지 zip 권한을 build-pkg.sh가 못 박음 ---
+# 작업 폴더 권한이 깨진 경우(폴더 700, 파일 600)를 일부러 만들어도 zip 안은 폴더 755·실행 파일 755·나머지 644여야 한다.
+P14=$T/p14; mkdir -p $P14/src
+cp -R $PKG/. $P14/src/
+find $P14/src -type d -exec chmod 700 {} +; find $P14/src -type f -exec chmod 600 {} +
+# 리뷰 반영: APK versionCode 대조는 가짜 aapt2로(SDK 없는 PC에서도 돌게). 가짜는 a14vc 파일의 값을 낸다
+printf '#!/bin/sh\necho "package: name='"'"'korea.projection.app'"'"' versionCode='"'"'$(cat %s/a14vc)'"'"' versionName='"'"'x'"'"'"\n' $P14 > $P14/aapt2; chmod +x $P14/aapt2
+sed -n 's/^APK_VC=//p' $PKG/svc/hotspot.sh > $P14/a14vc; export AAPT2=$P14/aapt2
+PKGDIR=$P14/src sh $B/scripts/build-pkg.sh $P14/k.zip > $P14/out 2>&1; P14RC=$?
+# zipinfo 한 줄: 권한 … 이름. 기대값과 다른 줄만 모은다
+zmodes() { zipinfo "$1" 2>/dev/null | awk '$1 ~ /^[d-]/ {print $1, $NF}'; }
+zmodes $P14/k.zip > $P14/modes
+P14BAD=$(awk '
+  $2 ~ /\/$/ { if ($1 != "drwxr-xr-x") print; next }
+  $2 == "svc/hotspot.sh" || $2 == "scripts/post.sh" || $2 == "scripts/preun.sh" || $2 == "bin/status.sh" || $2 == "bin/busybox" { if ($1 != "-rwxr-xr-x") print; next }
+  { if ($1 != "-rw-r--r--") print }' $P14/modes)
+check "1.7.4 B-14: build-pkg.sh는 작업 폴더가 700/600이어도 zip 안을 폴더 755·실행 파일 755·나머지 644로 만듦" '[ $P14RC = 0 ] && [ -s $P14/modes ] && [ -z "$P14BAD" ]'
+check "  B-14: 실행 파일 5개(hotspot.sh·post.sh·preun.sh·status.sh·busybox)만 755, carreport.sh·지도 json은 644" '[ "$(grep -c "^-rwxr-xr-x" $P14/modes)" = 5 ] && grep -qx -- "-rw-r--r-- bin/carreport.sh" $P14/modes && grep -qx -- "-rw-r--r-- hmgapi/maps/kia/niro/kor/260902/car.json" $P14/modes'
+# 파일 목록은 패키지 폴더와 같고(빠진 것·더한 것 없음), .DS_Store·._* 는 들어가지 않음, 내용은 패키지와 바이트까지 같음
+(cd $PKG && find NEMESIS.data svc scripts bin app hmgapi -type f ! -name .DS_Store ! -name '._*' | sort) > $P14/want
+awk '$1 ~ /^-/ {print $2}' $P14/modes | sort > $P14/got
+mkdir -p $P14/x && (cd $P14/x && unzip -q $P14/k.zip)
+check "  B-14: zip의 파일 목록이 패키지 폴더와 같고, 풀면 내용이 바이트까지 같음" 'cmp -s $P14/want $P14/got && ! grep -q "DS_Store\|/\._" $P14/got && diff -rq -x .DS_Store -x "._*" $P14/x $PKG >/dev/null 2>&1'
+check "  B-14: 패키지 폴더가 아니면 zip을 만들지 않음" '! PKGDIR=$T/nope sh $B/scripts/build-pkg.sh $P14/n.zip >/dev/null 2>&1 && [ ! -f $P14/n.zip ]'
+check "  B-14: 지금 작업 폴더로 만든 zip도 권한 규칙이 같음(기본 PKGDIR)" 'sh $B/scripts/build-pkg.sh $P14/d.zip >/dev/null 2>&1 && zmodes $P14/d.zip > $P14/dmodes && cmp -s $P14/dmodes $P14/modes'
+# 리뷰 반영: 숨김 파일·편집기 사본이 있으면 멈춤, APK versionCode가 APK_VC와 다르거나 aapt2가 없으면 멈춤
+for bf in .DS_Store bin/._busybox svc/hotspot.sh~ scripts/.preun.sh.swp NEMESIS.data.orig; do
+  : > $P14/src/$bf; rm -f $P14/b.zip
+  PKGDIR=$P14/src sh $B/scripts/build-pkg.sh $P14/b.zip > $P14/bout 2>&1; P14B=$?; rm -f $P14/src/$bf
+  check "  B-14 리뷰: 패키지에 $bf가 있으면 만들지 않고 이름을 알림" '[ $P14B != 0 ] && [ ! -f $P14/b.zip ] && grep -q "숨김 파일·편집기 사본" $P14/bout && grep -q "${bf##*/}" $P14/bout'
+done
+echo 36 > $P14/a14vc; rm -f $P14/b.zip; PKGDIR=$P14/src sh $B/scripts/build-pkg.sh $P14/b.zip > $P14/bout 2>&1; P14B=$?
+check "  B-14 리뷰: APK의 versionCode(36)가 APK_VC와 다르면 만들지 않음" '[ $P14B != 0 ] && [ ! -f $P14/b.zip ] && grep -q "APK의 versionCode(36)가" $P14/bout'
+sed -n 's/^APK_VC=//p' $PKG/svc/hotspot.sh > $P14/a14vc
+(AAPT2=$P14/none; export AAPT2; PKGDIR=$P14/src sh $B/scripts/build-pkg.sh $P14/b.zip) > $P14/bout 2>&1; P14B=$?
+check "  B-14 리뷰: aapt2가 없으면 이유를 알리고 만들지 않음" '[ $P14B != 0 ] && [ ! -f $P14/b.zip ] && grep -q "aapt2를 찾지 못해" $P14/bout'
+unset AAPT2
+rm -rf $P14
+
+# --- 1.7.4 B-8: carreport.sh는 hmgapid engine report가 끝난 뒤 pid를 비움(복사 중 TERM이 다른 프로세스를 죽이지 않게) ---
+CRW=$(grep -n '^wait \$p 2>/dev/null$' $PKG/bin/carreport.sh | cut -d: -f1); CRP=$(grep -n '^p=$' $PKG/bin/carreport.sh | tail -1 | cut -d: -f1)
+check "1.7.4 B-8(소스 검사): carreport.sh는 hmgapid engine report를 기다린 직후(3줄 안) p=를 비움, trap은 p가 있을 때만 kill" '[ -n "$CRW" ] && [ -n "$CRP" ] && [ "$CRP" -gt "$CRW" ] && [ "$CRP" -le $((CRW+3)) ] && grep -q "trap .\[ -n \"\$p\" \] && kill \$p" $PKG/bin/carreport.sh'
+
+# --- 1.7.4 베타 2(측정): 30초 측정 기록(perf_tick), 카플레이 소리 통계(aa_events), 제보 파일의 부하·소리 지연 칸(perf_report) ---
+PF=$T/pf; mkdir -p $PF/w $PF/net $PF/proc $PF/bin; echo boot-P > $PF/bootid
+pfreset() { rm -f $PF/w/perf.log $PF/w/perf.log.1 $PF/w/cpn; echo "1000.50 3" > $PF/up; echo "cpu  1000 0 500 8000 100 0 10 0 0 0" > $PF/kstat; echo "1.52 1.00 0.80 2/300 999" > $PF/load
+  printf 'MemTotal: 2048000 kB\nMemFree: 307200 kB\nBuffers: 1024 kB\nCached: 716800 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n' > $PF/mem
+  printf 'Inter-|   Receive\n face |bytes\n    lo: 1 1 0 0 0 0 0 0 1 1 0 0 0 0 0 0\n wlan0:999999 1000 1 2 0 0 0 0 888888 2000 3 4 0 0 0 0\n' > $PF/net/dev
+  printf 'Tcp: RtoAlgorithm RtoMin RtoMax MaxConn ActiveOpens PassiveOpens AttemptFails EstabResets CurrEstab InSegs OutSegs RetransSegs InErrs OutRsts\nTcp: 1 200 120000 -1 5 5 0 0 2 900 800 7 0 0\nUdp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors\nUdp: 500 0 3 400 2 0\n' > $PF/net/snmp; }
+# 차의 셸(mksh)과 ksh, sh에서 모두 돌린다. PATH를 비운 채 불러 프로세스를 하나도 띄우지 않는지도 본다(띄우면 "not found"로 값이 빈다)
+pf() { (PATH=$T/bin:/usr/bin:/bin:/sbin HOTSPOT_LIB=1 BB=$T/bin/bb W=$PF/w BOOT_ID=$PF/bootid UPTIME=$PF/up KSTAT=$PF/kstat LOADAVG=$PF/load MEMINFO=$PF/mem PROCNET=$PF/net PROC=$PF/proc CONF=$PF/hk.conf APLOG=$PF/ap.log ${PFSH:-sh} -c '. '$T'/app/svc/hotspot.sh; export PATH='$T'/bin:/usr/bin:/bin:/sbin; '"$1"); }
+PFRUN='mkdir -p $PROC/$$; echo "$$ (sh) S 1 1 1 0 -1 0 0 0 0 0 10 5 100 50 20 0 1 0" > $PROC/$$/stat; echo 1 > $CPN; AA_SOD=36305; WSTA=1; perf_start; PATH=/nonexistent; perf_begin; echo "1002.75 3" > $UPTIME; perf_tick; echo "cpu  1300 0 600 10000 200 0 10 0 0 0" > $KSTAT; echo "$$ (sh) S 1 1 1 0 -1 0 0 0 0 0 12 6 160 70 20 0 1 0" > $PROC/$$/stat; echo " wlan0:999999 1500 1 9 0 0 0 0 888888 2600 3 4 0 0 0 0" > $PROCNET/dev; echo "1030.00 3" > $UPTIME; perf_begin; echo "1034.12 3" > $UPTIME; perf_tick'
+for PFSH in sh $KSHS; do
+  pfreset; pf "$PFRUN" > $PF/out 2>&1
+  check "1.7.4 베타 2 측정($(basename $PFSH)): 30초 측정 기록 첫 줄은 변화량을 '-'로, 시각·점검 시간(2.25초)·메모리·연결 수는 채움" '[ "$(sed -n 2p $PF/w/perf.log)" = "10:05:05 up=1002 load=1.52 cpu=- io=- svc=- tick=225 free=307200 cache=716800 cp=1 sta=1 rx=- tx=- rxe=- rxd=- txe=- txd=- udpe=- udpb=- retr=- dbg=0 wm=1 wn=16" ]'
+  check "  둘째 줄은 지난 점검부터의 변화량: 내비 CPU 16%·입출력 대기 4%, 우리 서비스 0.83초, 점검 4.12초, Wi-Fi 받은 패킷 500·버림 7" '[ "$(sed -n 3p $PF/w/perf.log)" = "10:05:05 up=1034 load=1.52 cpu=16 io=4 svc=83 tick=412 free=307200 cache=716800 cp=1 sta=1 rx=500 tx=600 rxe=0 rxd=7 txe=0 txd=0 udpe=0 udpb=0 retr=0 dbg=0" ]'
+  check "  프로세스를 띄우지 않음(PATH를 비워도 값이 같고 오류 줄 없음), 첫 줄은 서비스 시작 표시" '[ ! -s $PF/out ] && grep -q "^# 서비스 시작 .* up=1000$" $PF/w/perf.log && [ "$(grep -c . $PF/w/perf.log)" = 3 ]'
+done
+unset PFSH
+pfreset; pf 'PERF_MAX=3; perf_start; for i in 1 2 3 4; do perf_begin; perf_tick; done; echo "N=$PF_N"' > $PF/out 2>&1
+check "  크기 제한: PERF_MAX줄이 차면 perf.log.1로 밀고 새로 씀(최대 2개)" 'grep -qx "N=2" $PF/out && [ "$(grep -c "^--:--:-- up=1000 load=1.52 cpu=- io=- svc=- tick=0 free=307200 cache=716800 cp=0 sta=0 " $PF/w/perf.log.1)" = 2 ] && [ "$(grep -c . $PF/w/perf.log.1)" = 3 ] && [ "$(grep -c . $PF/w/perf.log)" = 2 ] && [ -z "$(ls $PF/w | grep -v -E "^perf\.log(\.1)?$")" ]'
+pfreset; rm -f $PF/kstat $PF/load $PF/mem $PF/net/dev $PF/net/snmp $PF/up; pf 'perf_begin; perf_tick; perf_tick' > $PF/out 2>&1
+check "  /proc 파일을 하나도 못 읽어도 오류 없이 '-'로 한 줄씩 남김(서비스 반복을 멈추지 않음)" '[ ! -s $PF/out ] && [ "$(grep -c "up=- load=- cpu=- io=- svc=- tick=- free=- cache=- cp=0 sta=0 rx=- tx=- rxe=- rxd=- txe=- txd=- udpe=- udpb=- retr=- dbg=0" $PF/w/perf.log)" = 2 ]'
+check "  서비스 반복 두 곳(우리 핫스팟·순정 AP)이 대기 직후 perf_begin, 회차 끝에 perf_tick을 부름(소스)" '[ "$(grep -c "^    perf_begin$" $PKG/svc/hotspot.sh)" = 2 ] && [ "$(grep -c "^    perf_tick$" $PKG/svc/hotspot.sh)" = 2 ] && [ "$(awk "/^perf_tick\(\) \{/,/^}/" $PKG/svc/hotspot.sh | grep -c -E "\\$\([^(]|\`")" = 0 ]'
+# 카플레이 소리 통계: 순정 TccCarPlay 줄 꼴(니로 2026-11-06 cp.log). 이름이 든 줄(홍길동)은 옮기지 않는다
+cat > $PF/cplog <<'E'
+11-06 09:37:59.270 I/TccCarPlay( 1001):  [AirPlay] Main audio setting up AAC-LC/44100/2 for media, input no, loopback no
+11-06 09:38:05.690 I/TccCarPlay( 1001):  [AirPlay] Alt audio setting up OPUS/48000/1
+11-06 09:38:58.840 I/TccCarPlay( 1001):  [AirPlay] ### 1 glitches in the last minute of 26 minute(s) (7% glitchy)
+11-06 10:01:38.960 I/TccCarPlay( 1001):  [AirPlay] Main audio setting up OPUS/16000/1 for telephony, input yes, loopback no
+11-06 10:09:45.070 I/TccCarPlay( 1001):  [AirPlay] ### Lost packets 10315-10316 (+1, 1 total)
+11-06 10:09:46.070 I/TccCarPlay( 1001):  [AirPlay] ### Unrecovered packets: 42041-59293 (17252) 17252 total
+11-06 10:09:47.070 I/TccCarPlay( 1001):  [AirPlay] Jitter Buffer Discard Excess, prevSize=13440(280ms) newSize=9600(200ms)
+11-06 10:09:48.070 I/TccCarPlay( 1001):  [AirPlay] ### Main: Buffering issues during session: Late=0 Missing=1 Gaps=0 Rebuffers=1
+11-06 10:09:49.000 I/TccCarPlay( 1001): AirPlay session ended: Dur=1529 seconds Reason=-6753/0xFFFFE59F 
+11-06 10:09:49.001 I/TccCarPlay( 1001): Glitches:    8%, 5 total, 2 glitchy minute(s)
+11-06 10:09:49.002 I/TccCarPlay( 1001): Retransmits: 0 sent, 0 received, 0 futile, 0 not found, 0/0/0 ms min/max/avg, 0/0 ms retry min/max
+11-06 10:09:49.003 I/TccCarPlay( 1001): Packets:     0 lost, 29991 unrecovered, 0 late, 0 max burst, 0 big losses, 16% compression
+11-06 10:09:49.004 I/TccCarPlay( 1001): Time Sync:   2/171/22 ms min/max/avg RTT, -84101/2147483647/6313 µS min/max/avg offset, 0 step(s)
+11-06 10:09:50.000 I/TccCarPlay( 1001):  [TccCarPlay] TccCarPlay_OnTelephony() : name(홍길동) Packets: 3 Main audio setting up 홍길동폰 for 홍길동, x
+11-06 10:09:50.100 I/TccCarPlay( 1001):  [AirPlay] Main audio setting up Johns-iPhone for John Smith 010-1234-5678, x
+11-06 10:09:50.200 I/TccCarPlay( 1001): AirPlay session ended: Dur=1 seconds Reason=0/0x0 peer=192.168.49.23 dev=A4:83:E7:11:22:33 Johns iPhone
+11-06 10:09:50.300 I/TccCarPlay( 1001):  [AirPlay] Jitter Buffer Discard Excess, prevSize=1(2ms) newSize=3(4ms) John
+11-06 10:09:51.000 E/Playback_if( 1007): =========> [94] Can't render and Drop (with 0 ms) for CarPlay because of Null surface ? 
+11-06 10:09:52.000 E/AudioMixer(  146): STREAM UNDERRUN, clear 7680 bytes
+E
+printf '#!/bin/sh\ncat %s/cplog\n' $PF > $PF/bin/logcat; chmod +x $PF/bin/logcat
+pfa() { (PATH=$PF/bin:$T/bin:/usr/bin:/bin:/sbin HOTSPOT_LIB=1 BB=$T/bin/bb W=$PF/w BOOT_ID=$PF/bootid UPTIME=$PF/up KSTAT=$PF/kstat LOADAVG=$PF/load MEMINFO=$PF/mem PROCNET=$PF/net PROC=$PF/proc CONF=$PF/hk.conf APLOG=$PF/ap.log ${PFASH:-sh} -c '. '$T'/app/svc/hotspot.sh; export PATH='$PF'/bin:'$T'/bin:/usr/bin:/bin:/sbin; '"$1"); }
+rm -f $PF/w/aatime; pfa 'aa_events; echo "SOD=$AA_SOD"' > $PF/cp1 2>&1
+check "1.7.4 베타 2 측정: 순정 카플레이의 소리 통계 줄을 ap.log에 '카플레이 소리:'로 옮김(끊김·잃은 패킷·지터 버퍼·세션 요약, 보조 소리 설정은 뺌)" '[ "$(grep -c "카플레이 소리: " $PF/cp1)" = 12 ] && grep -q "카플레이 소리: 지난 1분에 끊김 1번(26분 중 7%) (09:38:58.840)" $PF/cp1 && grep -q "카플레이 소리: 소리 설정 OPUS/16000/1 telephony" $PF/cp1 && grep -q "카플레이 소리: 패킷 잃음 +1(모두 1)" $PF/cp1 && grep -q "카플레이 소리: 되살리지 못한 패킷 17252(모두 17252)" $PF/cp1 && grep -q "지터 버퍼가 넘쳐 버림 prevSize=13440(280ms) newSize=9600(200ms)" $PF/cp1 && grep -q "세션 버퍼 문제(주 소리) Late=0 Missing=1 Gaps=0 Rebuffers=1" $PF/cp1 && grep -q "세션 요약 Wi-Fi 왕복 시간 2/171/22 ms (최소/최대/평균) (10:09:49.004)" $PF/cp1 && grep -q "세션 요약 패킷 0 , 29991 , 0 , 0 , 0 , 16% (잃음 · 못 되살림" $PF/cp1 && grep -q "세션 요약 재전송 0 , 0 , 0 , 0 , 0/0/0 , 0/0 (보냄" $PF/cp1 && ! grep -q "Alt\|OPUS/48000" $PF/cp1'
+check "  리뷰 M3: 이름·주소가 섞인 줄(한글·영문 이름, 전화번호, IP, MAC)은 꼴이 달라 옮기지 않음, aa_events가 측정 기록용 시각(AA_SOD)을 남김" '! grep -q -E "홍길동|John|010-1234|192\.168|A4:83" $PF/cp1 && grep -q -E "^SOD=[0-9]+$" $PF/cp1'
+# 리뷰 M2: 소리 줄이 몰려도 AA 단계 줄을 한도에서 밀어내지 않는다
+cp $PF/cplog $PF/cplog.keep
+{ i=0; while [ $i -lt 25 ]; do echo "11-06 11:00:0$((i % 10)).0$((i / 10))0 I/TccCarPlay( 1001):  [AirPlay] ### Lost packets 1-2 (+1, $i total)"; i=$((i+1)); done
+  echo "11-06 11:00:30.000 I/PhoneProjection( 1660): [ f ] getWiFiApMode wifiMode = 2"; echo "11-06 11:00:31.000 D/AAProjection(  775): WirelessExplorer : isWifiApEnable = true, mode = 2"; } > $PF/cplog
+rm -f $PF/w/aatime; pfa 'aa_events' > $PF/cp2 2>&1
+check "  리뷰 M2: 소리 줄 25개가 몰려도 한 번에 16줄까지만, 같은 회차의 AA 단계 줄 2개는 그대로 남음" '[ "$(grep -c "카플레이 소리: " $PF/cp2)" = 16 ] && [ "$(grep -c "안드로이드 오토: " $PF/cp2)" = 2 ]'
+cp $PF/cplog.keep $PF/cplog
+# 리뷰 M1·L2·L3
+pfreset; printf '%s\n' a b c d e > $PF/w/perf.log; pf 'perf_start; echo "N=$PF_N"' > $PF/out 2>&1
+check "  리뷰 M1: 서비스가 시작할 때 이미 쌓인 줄 수를 이어 셈(재부팅·다시 시작으로 한도를 넘기지 않게)" 'grep -qx "N=6" $PF/out && [ "$(grep -c . $PF/w/perf.log)" = 6 ]'
+pfreset; printf '%s\n' a b c d e > $PF/w/perf.log; pf 'PERF_MAX=5; perf_start; echo "N=$PF_N"' > $PF/out 2>&1
+check "  리뷰 M1: 시작할 때 이미 한도면 그 자리에서 perf.log.1로 밀고 새로 씀" 'grep -qx "N=1" $PF/out && [ "$(grep -c . $PF/w/perf.log.1)" = 5 ] && [ "$(grep -c . $PF/w/perf.log)" = 1 ]'
+pfreset; printf ' swlan0: 1 7777 0 0 0 0 0 0 1 7777 0 0 0 0 0 0\n wlan0: 1 1000 0 0 0 0 0 0 1 2000 0 0 0 0 0 0\n' > $PF/net/dev
+pf 'perf_begin; perf_tick; printf " swlan0: 1 9999 0 0 0 0 0 0 1 9999 0 0 0 0 0 0\n wlan0: 1 1010 0 0 0 0 0 0 1 2020 0 0 0 0 0 0\n" > $PROCNET/dev; perf_tick' > $PF/out 2>&1
+check "  리뷰 L2: Wi-Fi 숫자는 이름이 정확히 같은 장치 줄에서만(swlan0 줄이 앞에 있어도 wlan0)" 'grep -q " rx=10 tx=20 " $PF/w/perf.log'
+pfreset; printf ' wlan0: 1 3000001000 0 0 0 0 0 0 1 5 0 0 0 0 0 0\n' > $PF/net/dev
+pf 'perf_begin; perf_tick; printf " wlan0: 1 999999000 0 0 0 0 0 0 1 9 0 0 0 0 0 0\n" > $PROCNET/dev; perf_tick; printf " wlan0: 1 999999100 0 0 0 0 0 0 1 12 0 0 0 0 0 0\n" > $PROCNET/dev; perf_tick' > $PF/out 2>&1
+check "  리뷰 L3: 10자리가 넘는 값(32비트 산술을 넘을 수 있음)은 '-'로 두고 음수를 찍지 않음, 그 뒤 값은 다시 이어 셈" '[ ! -s $PF/out ] && ! grep -q "=-[0-9]" $PF/w/perf.log && [ "$(sed -n 2p $PF/w/perf.log | grep -c " rx=- tx=4 ")" = 1 ] && [ "$(sed -n 3p $PF/w/perf.log | grep -c " rx=100 tx=3 ")" = 1 ]'
+# 제보 파일의 부하·소리 지연 칸: status.sh의 함수만 꺼내 가짜 /proc으로 돌린다(표본 사이의 sleep 때 값을 바꾼다)
+pfreset; mkdir -p $PF/proc/100 $PF/proc/200 $PF/proc/300
+echo "100 (com.hkmc.dipo) S 1 1 1 0 -1 0 0 0 0 0 100 50 0 0 20 0 9 0 5 99999 25600 0" > $PF/proc/100/stat
+echo "200 (hostapd) S 1 1 1 0 -1 0 0 0 0 0 10 10 0 0 20 0 1 0 5 9999 512 0" > $PF/proc/200/stat
+echo "300 (홍 길동) S 1 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 5 9999 256 0" > $PF/proc/300/stat
+printf '%s\n' "ssid=SECRETSSID" "wpa_passphrase=SECRETPASS" "channel=149" "hw_mode=a" "ht_capab=[HT40+][SHORT-GI-20]" > $PF/hk.conf
+printf '%s\n' "# 서비스 시작 11-14 18:00:00 up=35" \
+  "18:00:30 up=65 load=1.00 cpu=- io=- svc=- tick=300 free=409600 cache=1 cp=0 sta=0 rx=- tx=- rxe=- rxd=- txe=- txd=- udpe=- udpb=- retr=- dbg=0" \
+  "18:01:00 up=95 load=2.50 cpu=40 io=5 svc=90 tick=400 free=307200 cache=1 cp=1 sta=1 rx=100 tx=100 rxe=0 rxd=3 txe=0 txd=1 udpe=2 udpb=1 retr=4 dbg=1" \
+  "18:01:30 up=125 load=3.00 cpu=80 io=1 svc=150 tick=600 free=204800 cache=1 cp=1 sta=1 rx=100 tx=100 rxe=1 rxd=2 txe=0 txd=0 udpe=0 udpb=0 retr=6 dbg=1" > $PF/w/perf.log
+printf '%s\n' "11-14 18:01:05 카플레이 소리: 지난 1분에 끊김 2번(3분 중 66%) (18:01:04.000)" "11-14 18:01:06 다른 줄" > $PF/ap.log
+# PF-1·PF-6: 우리 dnsmasq(pid 400)의 표준입력이 FIFO, 코어 4개
+mkdir -p $PF/proc/400/fd; echo "400 (dnsmasq) S 1 400" > $PF/proc/400/stat; mkfifo $PF/fifo400; ln -s $PF/fifo400 $PF/proc/400/fd/0; echo "400 boot-P" > $PF/w/dnsmasq.pid
+printf 'processor\t: 0\nmodel name\t: x\nprocessor\t: 1\nprocessor\t: 2\nprocessor\t: 3\n' > $PF/cpuinfo; CPUINFO=$PF/cpuinfo; export CPUINFO; echo 0-3 > $PF/cpupresent; CPUPRESENT=$PF/cpupresent; export CPUPRESENT
+PFREP='eval "$(awk "/^yn\(\) \{/ || /^up_s\(\) \{/ || /^PERF_SAMPLE=/; /^lastmask\(\) \{/,/^}/; /^proc_snap\(\) \{/,/^}/; /^perf_report\(\) \{/,/^}/" '$PKG'/bin/status.sh)"; sleep() { echo "cpu  1100 0 550 8100 150 0 10 0 0 0" > $KSTAT; echo "100 (com.hkmc.dipo) S 1 1 1 0 -1 0 0 0 0 0 150 100 0 0 20 0 9 0 5 99999 25600 0" > $PROC/100/stat; }; perf_report; ls $W'
+PFREP0=$(echo "$PFREP" | sed 's/sleep() {[^}]*}/sleep() { :; }/')
+pfa "$PFREP" > $PF/rep 2>&1
+check "1.7.4 베타 2 측정: 제보 파일의 '부하·소리 지연 측정' 칸 — 부하 평균·메모리(MB)·CPU 표본(사용 50%·입출력 대기 16%)" 'grep -q "^## 부하·소리 지연 측정" $PF/rep && grep -q "^- 부하 평균(1·5·15분): 1.52 1.00 0.80, 부팅 뒤 1000초$" $PF/rep && grep -q "^- 메모리(MB): 전체 2000, 비어 있음 300, 캐시 701, 스왑 0 중 0 비어 있음$" $PF/rep && grep -q "^- CPU 표본(3초, 코어 전체를 100%로): 사용 50%, 입출력 대기 16%, 쉼 33%$" $PF/rep'
+check "  CPU를 많이 쓴 프로세스: 표본 사이에 100틱을 쓴 것이 맨 위(33.3%, 100MB), 쓰지 않은 hostapd도 '우리 것'으로 한 줄, 한글 이름은 지워짐" 'grep -q "^ 33.3%   100 MB  com.hkmc.dipo(100)$" $PF/rep && grep -q "^  0.0%     2 MB  hostapd(200)$" $PF/rep && ! grep -q "길동" $PF/rep'
+check "  30초 측정 기록 요약: 전체 3줄(CPU 평균 60%·최대 80%, 점검 평균 4.33초·최대 6.00초, 서비스 CPU 평균 4.0%, 빈 메모리 최소 200MB), 카플레이 연결 중 2줄(Wi-Fi 받기 버림 5·UDP 오류 2·TCP 재전송 10), 디버그 2줄" 'grep -q "30초 측정 기록 요약(서비스가 남긴 것, 디버그 로그가 켜져 있던 줄 2개)" $PF/rep && grep -q "  - 전체(3줄, 약 1분): 내비 CPU 평균 60%·최대 80%, 입출력 대기 최대 5%, 부하 최대 3, 점검 한 번 평균 4.33초·최대 6.00초, 우리 서비스 셸과 점검 명령의 CPU 평균 4.0%(코어 하나를 100%로, 계속 도는 hostapd·디버그 로그 줄은 빼고), 빈 메모리 최소 200 MB" $PF/rep && grep -q "  - 카플레이 연결 중(2줄, 약 1분): 내비 CPU 평균 60%·최대 80%" $PF/rep && [ "$(grep -c "Wi-Fi 받기 오류 1·버림 5, 보내기 오류 0·버림 1, UDP 받기 오류 2·버퍼 넘침 1, TCP 재전송 10" $PF/rep)" = 2 ]'
+check "  Wi-Fi: 핫스팟 설정은 채널 쪽 값만(이름·비밀번호 줄 없음), 누적 패킷·오류, UDP·TCP 누적" 'grep -q "^- 핫스팟 설정(채널 쪽만): channel=149, hw_mode=a, ht_capab=\[HT40+\]\[SHORT-GI-20\]$" $PF/rep && ! grep -q "SECRET" $PF/rep && grep -q "^- Wi-Fi 장치(wlan0) 부팅 뒤 누적: 받은 패킷 1000(오류 1·버림 2), 보낸 패킷 2000(오류 3·버림 4)$" $PF/rep && grep -q "^- 네트워크 부팅 뒤 누적: UDP 받음 500(오류 3·버퍼 넘침 2), TCP 보냄 800(재전송 7)$" $PF/rep'
+check "  소리: logcat 버퍼의 통계 줄 개수와 마지막 소리 설정(형식 이름만), ap.log의 '카플레이 소리:' 줄만 실음, 임시 파일을 남기지 않음" 'grep -q "1분 끊김 알림 1줄(끊김 합 1번), 패킷 잃음 1줄, 되살리지 못한 패킷 1줄, 지터 버퍼 넘침 2줄, 세션 버퍼 문제 1줄, 시각 맞춤 요청 실패 0줄, 마지막 소리 설정 OPUS/16000/1 telephony$" $PF/rep && grep -q "카플레이 화면 프레임 버림 1줄, 화면 큐 넘침 0줄, 소리 출력 끊김(AudioMixer underrun) 1줄" $PF/rep && grep -q "^11-14 18:01:05 카플레이 소리: 지난 1분에 끊김 2번" $PF/rep && ! grep -q -E "다른 줄|홍길동|John" $PF/rep && [ -z "$(ls $PF/w | grep "perf\.s")" ]'
+check "  PF-1·PF-6·묶음 H: 리포트에 코어 수(cpuinfo 4, 커널 present 0-3)와 우리 dnsmasq의 표준입력 종류(FIFO면 고친 방식)" 'grep -qx -- "- 코어 수: 4 (cpuinfo), 커널 코어 범위(present): 0-3" $PF/rep && grep -qx -- "- 우리 dnsmasq의 표준입력: FIFO(고친 방식)" $PF/rep'
+rm -f $PF/proc/400/fd/0; ln -s /dev/null $PF/proc/400/fd/0; CPUPRESENT=$PF/nope; pfa "$PFREP0" > $PF/rep3 2>&1; CPUPRESENT=$PF/cpupresent
+check "  PF-1: 표준입력이 /dev/null이면(실제 /proc처럼 링크) '문자 장치(예전 방식)'로 씀" 'grep -qx -- "- 우리 dnsmasq의 표준입력: 문자 장치(/dev/null 등, 예전 방식)" $PF/rep3'
+check "  묶음 H: 커널 코어 범위(present)를 읽지 못하면 그 칸만 '읽지 못함'(cpuinfo 칸은 그대로)" 'grep -qx -- "- 코어 수: 4 (cpuinfo), 커널 코어 범위(present): 읽지 못함" $PF/rep3'
+check "  PF-5: 리포트가 /proc/net/dev를 그대로 실음(장치 이름과 숫자)" 'grep -q "^- 네트워크 장치 표(/proc/net/dev 그대로)$" $PF/rep && grep -q "^ wlan0:999999 1000 1 2 0 0 0 0 888888 2000 3 4 0 0 0 0$" $PF/rep'
+unset CPUINFO CPUPRESENT
+# PF-1: 우리 dnsmasq는 표준입력이 FIFO인 채로 뜬다(순정 dnsmasq가 /dev/null 표준입력에서 쉬지 않고 도는 것을 막음)
+printf '#!/bin/sh\nif [ -p /dev/fd/0 ]; then k=fifo; else k=other; fi\nrw=ro; ( echo x >&0 ) 2>/dev/null && rw=rw\necho "$k $*" >> %s/dcalls\necho "$rw $$" >> %s/dpid\n' $PF $PF > $PF/bin/dnsmasq
+printf '#!/bin/sh\nexit 0\n' > $PF/bin/ifconfig; chmod +x $PF/bin/dnsmasq $PF/bin/ifconfig
+PFUP='running() { return 0; }; aa_none() { :; }; dns_fifo_died() { return 1; }; DNSPID=$W/dnsmasq.pid; rm -f $DNSPID; up; wait; cat $DNSPID'
+for PFASH in sh $(command -v mksh); do
+  rm -f $PF/dcalls $PF/dpid $PF/w/dnsmasq.in
+  # 리뷰 M2: 셸이 FIFO 열기에서 멈추면 시험이 끝없이 멈추지 않게 20초 뒤 끊는다(그때는 아래 항목이 실패)
+  ( pfa "$PFUP" > $PF/up1 2>&1 ) & PFW=$!; ( sleep 20; kill $PFW 2>/dev/null ) >/dev/null 2>&1 & PFK=$!; wait $PFW 2>/dev/null; { kill $PFK; wait $PFK; } 2>/dev/null
+  check "PF-1($(basename $PFASH)): FIFO가 읽기·쓰기로 열려 있고(끝이 오지 않음) pid 파일의 pid가 dnsmasq 자신" '[ "$(cat $PF/dpid 2>/dev/null)" = "rw $(sed "s/ .*//" $PF/up1 | grep -E "^[0-9]+$")" ] && grep -q "^fifo " $PF/dcalls'
+done
+unset PFASH
+rm -f $PF/dcalls $PF/dpid $PF/w/dnsmasq.in; pfa "$PFUP" > $PF/up1 2>&1
+check "PF-1: 우리 dnsmasq는 표준입력을 FIFO로 받아 뜸(옵션은 그대로), pid 파일에 pid와 부팅 id" '[ "$(cat $PF/dcalls)" = "fifo --keep-in-foreground --no-resolv --no-poll --dhcp-authoritative --pid-file --interface=wlan0 --bind-interfaces --dhcp-range=192.168.43.10,192.168.43.50,255.255.255.0,1h --dhcp-option=3 --dhcp-option=6" ] && [ -p $PF/w/dnsmasq.in ] && grep -q -E "^[0-9]+ boot-P$" $PF/up1 && grep -q "dnsmasq 시작" $PF/up1'
+rm -f $PF/dcalls $PF/w/dnsmasq.in; echo junk > $PF/w/dnsmasq.in; pfa "$PFUP" > $PF/up2 2>&1
+check "  그 자리에 보통 파일이 있으면 지우고 FIFO로 다시 만듦" '[ -p $PF/w/dnsmasq.in ] && grep -q "^fifo " $PF/dcalls'
+rm -f $PF/dcalls $PF/w/dnsmasq.in; mkfifo -m 666 $PF/w/dnsmasq.in; PFI0=$(ls -i $PF/w/dnsmasq.in | awk '{print $1}'); pfa 'umask 077; '"$PFUP" > $PF/up2b 2>&1
+check "  묶음 H(리뷰 낮음 2): FIFO가 이미 있어도 지우고 새로 만듦(서비스의 umask 077로 0600), 새 FIFO로 띄움" '[ -p $PF/w/dnsmasq.in ] && [ "$(stat -f %Lp $PF/w/dnsmasq.in)" = 600 ] && [ "$(ls -i $PF/w/dnsmasq.in | awk "{print \$1}")" != "$PFI0" ] && grep -q "^fifo " $PF/dcalls'
+rm -f $PF/dcalls $PF/w/dnsmasq.in; mkfifo $PF/lnktarget; ln -s $PF/lnktarget $PF/w/dnsmasq.in; pfa 'umask 077; '"$PFUP" > $PF/up2c 2>&1
+check "  묶음 H: 그 자리에 남이 넣은 링크가 있으면 링크만 지우고(가리키던 것은 그대로) 우리 FIFO를 새로 만듦" '[ -p $PF/w/dnsmasq.in ] && [ ! -L $PF/w/dnsmasq.in ] && [ -p $PF/lnktarget ] && grep -q "^fifo " $PF/dcalls'
+rm -f $PF/lnktarget
+printf '#!/bin/sh\ncase "$1" in mkfifo|mknod) exit 1 ;; esac\nexec "$@"\n' > $PF/bin/bbno; chmod +x $PF/bin/bbno
+rm -f $PF/dcalls $PF/w/dnsmasq.in; pfa 'BB='$PF'/bin/bbno; running() { return 0; }; dns_fifo_died() { return 1; }; DNSPID=$W/dnsmasq.pid; rm -f $DNSPID; up; wait; rm -f $DNSPID; up; wait' > $PF/up3 2>&1
+check "  FIFO를 못 만드는 내비(mkfifo·mknod 없음)는 예전 방식으로 띄우고 이유는 한 번만 남김(핫스팟을 막지 않음)" '[ "$(grep -c "^other --keep-in-foreground" $PF/dcalls)" = 2 ] && [ "$(grep -c "FIFO를 만들지 못함" $PF/up3)" = 1 ] && [ ! -e $PF/w/dnsmasq.in ]'
+# 리뷰: FIFO 열기에서 멈춘 하위 셸(살아 있는데 dnsmasq가 아니고 부모가 서비스 셸)을 끝내고 예전 방식으로 내려감
+rm -f $PF/dcalls $PF/w/dnsmasq.in; pfa 'running() { return 0; }; DNSPID=$W/dnsmasq.pid; DNS_FIFO=1; mkdir -p $PROC/777; echo "777 (sh) S $$ 1" > $PROC/777/stat; echo "777 boot-P" > $DNSPID; kill() { echo "kill $*"; }; dns_fifo_died() { return 1; }; up; wait' > $PF/up4 2>&1
+check "  PF-1 리뷰: FIFO로 띄운 것이 멈춰 있으면(살아 있는데 dnsmasq가 아님) 끝내고 그 실행에서는 예전 방식으로 띄움, 이유는 한 번" 'grep -qx "kill 777" $PF/up4 && [ "$(grep -c "예전 방식으로 띄움" $PF/up4)" = 1 ] && grep -q "^other --keep-in-foreground" $PF/dcalls && ! grep -q "^fifo " $PF/dcalls'
+rm -f $PF/dcalls; pfa 'running() { return 0; }; DNSPID=$W/dnsmasq.pid; DNS_FIFO=1; mkdir -p $PROC/778; echo "778 (sh) S 1 1" > $PROC/778/stat; echo "778 boot-P" > $DNSPID; kill() { echo "kill $*"; }; dns_fifo_died() { return 1; }; up; wait' > $PF/up5 2>&1
+check "  부모가 서비스 셸이 아닌 pid(다시 쓰인 pid)는 죽이지 않음, 직전이 FIFO 방식인데 dnsmasq가 아니므로 그 실행은 예전 방식(묶음 H)" '! grep -q "^kill" $PF/up5 && grep -q "^other --keep-in-foreground" $PF/dcalls && ! grep -q "^fifo " $PF/dcalls'
+# 묶음 H(PF-1 리뷰 중간 1): FIFO 방식으로 띄운 dnsmasq가 떠 있지 않으면 다음 up()에서 예전 방식(표준입력 리다이렉션 없음)으로 내림
+# ①② 는 묶음 H 최종에서 살아 있는 가짜로 다시 썼다(아래 'H최종')
+printf '#!/bin/sh\ncase "$1" in mkfifo|mknod) %s "$@" || exit 1; chmod 000 "$2"; exit 0 ;; esac\nexec %s "$@"\n' $T/bin/bb $T/bin/bb > $PF/bin/bbf0; chmod +x $PF/bin/bbf0
+# ③ 정상: FIFO로 뜬 dnsmasq가 살아 있으면(가짜 /proc에 그 pid의 dnsmasq) 다음 up()은 다시 띄우지도 내리지도 않음
+rm -f $PF/dcalls $PF/w/dnsmasq.in; pfa 'running() { return 0; }; dns_fifo_died() { return 1; }; DNSPID=$W/dnsmasq.pid; rm -f $DNSPID; up; wait; read p b < $DNSPID; mkdir -p $PROC/$p; echo "$p (dnsmasq) S $$ 1" > $PROC/$p/stat; ls -i $DNSIN; up; wait; up; wait; ls -i $DNSIN; echo "FIFO=$DNS_FIFO"; rm -rf $PROC/$p' > $PF/uph3 2>&1
+check "  묶음 H: FIFO로 뜬 dnsmasq가 살아 있으면 다음 up()들은 다시 띄우지도 예전 방식으로 내리지도 않고, 그 FIFO도 다시 만들지 않음" '[ "$(grep -c . $PF/dcalls)" = 1 ] && grep -q "^fifo " $PF/dcalls && ! grep -q "떠 있지 않음" $PF/uph3 && grep -qx "FIFO=1" $PF/uph3 && [ "$(grep -c "dnsmasq.in$" $PF/uph3)" = 2 ] && [ "$(grep "dnsmasq.in$" $PF/uph3 | sort -u | grep -c .)" = 1 ]'
+# ④ 끄기: stop_ours 뒤 FIFO dnsmasq(표준입력을 읽으며 기다리는 가짜)가 끝나고 남는 프로세스가 없음. 일부러 끈 것이므로 다음 up()은 FIFO 그대로
+mkdir -p $PF/bin4; printf '#!/bin/sh\n[ -p /dev/fd/0 ] && echo "fifo $$" >> %s/dcalls4\nread x\n' $PF > $PF/bin4/dnsmasq; chmod +x $PF/bin4/dnsmasq
+rm -f $PF/dcalls4 $PF/w/dnsmasq.in
+PFSTOP='export PATH='$PF'/bin4:$PATH; running() { return 0; }; dns_fifo_died() { return 1; }; PS=true; DNSPID=$W/dnsmasq.pid; rm -f $DNSPID
+mark() { read p b < $DNSPID; mkdir -p $PROC/$p; echo "$p (dnsmasq) S $$ 1" > $PROC/$p/stat; }
+# 가짜가 실제로 떠서 FIFO를 쥘 때까지(줄 수가 $1이 될 때까지)만 기다린다. 시각이 아니라 조건을 본다(최대 약 10초)
+seen() { i=0; while [ "$(grep -c "^fifo " '$PF'/dcalls4 2>/dev/null)" != "$1" ] && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done; }
+up; mark; p1=$p; seen 1; stop_ours; wait $p1 2>/dev/null; kill -0 $p1 2>/dev/null && echo "alive1" || echo "gone1"; [ -f $DNSPID ] && echo pidfile1
+up; mark; p2=$p; seen 2; stop_ours; wait $p2 2>/dev/null; kill -0 $p2 2>/dev/null && echo "alive2" || echo "gone2"; rm -rf $PROC/$p1 $PROC/$p2'
+( pfa "$PFSTOP" > $PF/uph4 2>&1 ) & PFW=$!; ( sleep 20; kill $PFW 2>/dev/null ) >/dev/null 2>&1 & PFK=$!; wait $PFW 2>/dev/null; { kill $PFK; wait $PFK; } 2>/dev/null
+check "  묶음 H: stop_ours 뒤 FIFO dnsmasq가 끝나고 pid 파일이 지워짐, 다음 up()도 FIFO 방식(일부러 끈 것은 내리지 않음), 남은 프로세스 0" 'grep -qx gone1 $PF/uph4 && grep -qx gone2 $PF/uph4 && ! grep -q pidfile1 $PF/uph4 && [ "$(grep -c "^fifo " $PF/dcalls4)" = 2 ] && ! grep -q "떠 있지 않음" $PF/uph4 && ! ps -axo command | grep -v grep | grep -q "$PF/bin4/dnsmasq"'
+# --- 묶음 H 최종(리뷰 중간 1·2·3, 낮음 2·4·5) ---
+# 살아 있는 가짜 dnsmasq: 살아 있는 동안만 가짜 /proc에 "(dnsmasq) S" stat을 둔다(죽은 것과 살아 있는 것을 실제로 가름).
+# 모드($PF/lmode): fifodie = 표준입력이 FIFO면 바로 끝남, alldie = 늘 바로 끝남, 그 밖 = 끝날 때까지 산다(TERM이면 stat을 지우고 끝)
+mkdir -p $PF/binL
+cat > $PF/binL/dnsmasq <<E
+#!/bin/sh
+P=$PF; k=other; [ -p /dev/fd/0 ] && k=fifo
+echo "\$k \$\$" >> \$P/lcalls
+m=\$(cat \$P/lmode 2>/dev/null)
+if [ "\$m" = alldie ] || { [ "\$m" = fifodie ] && [ \$k = fifo ]; }; then : > \$P/lstart.\$\$; exit 1; fi
+nm=dnsmasq; [ "\$m" = asshell ] && nm=sh
+mkdir -p \$P/proc/\$\$; echo "\$\$ (\$nm) S \$PPID 1" > \$P/proc/\$\$/stat
+sp=; trap 'kill \$sp 2>/dev/null; rm -rf \$P/proc/\$\$; exit 0' TERM
+: > \$P/lstart.\$\$
+while :; do /bin/sleep 300 & sp=\$!; wait \$sp; done
+E
+chmod +x $PF/binL/dnsmasq
+# 기다림은 시각이 아니라 조건: 지금 pid 파일의 가짜가 시작 표시를 남겼거나, 좀비·없음이 될 때까지(최대 약 10초).
+# 서비스의 "FIFO 직후 1초"(sleep 1)도 이 기다림으로 바꿔 친다. tick = 서비스의 30초 점검 한 번(up)과 그 뒤 자리 잡기
+PFL='export PATH='$PF'/binL:$PATH; running() { return 0; }; PS=true; DNSPID=$W/dnsmasq.pid
+sleep() { read _p _b < $DNSPID 2>/dev/null; _i=0; while [ -n "$_p" ] && [ ! -f '$PF'/lstart.$_p ] && [ "$(ps -o stat= -p $_p 2>/dev/null | cut -c1)" != Z ] && kill -0 $_p 2>/dev/null && [ $_i -lt 200 ]; do command sleep 0.05; _i=$((_i+1)); done; }
+tick() { TICK_N=$((${TICK_N:-0}+1)); up; sleep; }
+alive() { read _p _b < $DNSPID; [ -f $PROC/$_p/stat ] && echo "alive $_p" || echo "dead $_p"; }
+'
+lreset() { rm -f $PF/lcalls $PF/lstart.* $PF/lmode $PF/w/dnsmasq.pid $PF/w/dnsmasq.in; }
+# 끝난 뒤 살아 있는 가짜를 모두 끝내고, 남은 것이 없는지(최대 약 10초 조건 기다림)
+lclean() { for p in $(awk '{print $2}' $PF/lcalls 2>/dev/null); do kill $p 2>/dev/null; done; i=0; while ps -axo command | grep -v grep | grep -q "$PF/binL/dnsmasq" && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done; }
+lleft() { ! ps -axo command | grep -v grep | grep -q "$PF/binL/dnsmasq"; }
+FBMSG="FIFO 표준입력으로 띄웠지만 떠 있지 않음"
+# H최종 ① FIFO를 열 수 없음(만들 때마다 0000): 같은 점검 안에서 1초 확인으로 예전 방식이 떠 있어야 함, 다음 점검은 그대로
+lreset; pfa 'BB='$PF'/bin/bbf0; '"$PFL"' rm -f $DNSPID; tick; alive; tick; alive' > $PF/hf1 2>&1; chmod 600 $PF/w/dnsmasq.in 2>/dev/null; lclean
+check "  H재리뷰 낮음 1: FIFO 열기 실패 오류 줄(Permission denied·can't)이 서비스 출력(ap.log 쪽)으로 새지 않음" '! grep -q -i -e "denied" -e "can.t" $PF/hf1'
+check "  H최종 ①: FIFO를 열 수 없으면 같은 점검에서 예전 방식으로 띄워 살아 있음(DHCP 공백 없음), 다음 점검은 다시 띄우지 않음, 이유 한 번" '[ "$(grep -c . $PF/lcalls)" = 1 ] && grep -q "^other " $PF/lcalls && [ "$(grep -c "^alive " $PF/hf1)" = 2 ] && [ "$(grep -c "$FBMSG" $PF/hf1)" = 1 ] && lleft'
+# H최종 ② 표준입력이 FIFO일 때만 바로 끝남: 같은 점검에서 예전 방식, 그 뒤 점검들도 예전 방식에 머묾(FIFO 다시 안 띄움)
+lreset; echo fifodie > $PF/lmode; pfa "$PFL"' rm -f $DNSPID; tick; alive; tick; tick; alive' > $PF/hf2 2>&1; lclean
+check "  H최종 ②: FIFO에서만 바로 끝나면 같은 점검에서 예전 방식(살아 있음), 다음 점검들도 예전 방식에 머묾, 이유 한 번" '[ "$(sed -n 1p $PF/lcalls | cut -d" " -f1)" = fifo ] && [ "$(sed -n 2p $PF/lcalls | cut -d" " -f1)" = other ] && [ "$(grep -c . $PF/lcalls)" = 2 ] && [ "$(grep -c "^alive " $PF/hf2)" = 2 ] && [ "$(grep -c "$FBMSG" $PF/hf2)" = 1 ] && lleft'
+# H최종 ③ 살아 있는 것을 본 뒤에 죽으면(몇 시간 잘 돌다 죽음) FIFO 탓으로 보지 않고 다시 FIFO
+lreset; pfa "$PFL"' rm -f $DNSPID; tick; tick; read p0 b < $DNSPID; kill $p0; i=0; while [ -d $PROC/$p0 ] && [ $i -lt 200 ]; do command sleep 0.05; i=$((i+1)); done; tick; alive' > $PF/hf3 2>&1; lclean
+check "  H최종 ③(중간 1): 점검에서 살아 있음을 본 FIFO dnsmasq가 나중에 죽으면 다시 FIFO로 띄움(예전 방식으로 내리지 않음)" '[ "$(grep -c "^fifo " $PF/lcalls)" = 2 ] && ! grep -q "^other " $PF/lcalls && grep -q "^alive " $PF/hf3 && ! grep -q "$FBMSG" $PF/hf3 && lleft'
+# H최종 ④ FIFO와 무관한 즉시 종료(wlan0 없음 등)가 풀린 뒤에는 다시 FIFO. 그동안도 점검마다 dnsmasq를 하나 이상 띄움
+lreset; echo alldie > $PF/lmode; pfa "$PFL"' rm -f $DNSPID; tick; echo "n1=$(grep -c . '$PF'/lcalls)"; tick; echo "n2=$(grep -c . '$PF'/lcalls)"; echo ok > '$PF'/lmode; tick; alive' > $PF/hf4 2>&1; lclean
+check "  H최종 ④(중간 1): 무관한 즉시 종료가 풀리면 다시 FIFO로 떠 살아 있음, 그동안 점검마다 dnsmasq를 띄움(FIFO→예전→FIFO…)" '[ "$(tail -1 $PF/lcalls | cut -d" " -f1)" = fifo ] && grep -q "^alive " $PF/hf4 && n1=$(sed -n "s/^n1=//p" $PF/hf4) && n2=$(sed -n "s/^n2=//p" $PF/hf4) && [ "$n1" -ge 1 ] && [ "$n2" -gt "$n1" ] && lleft'
+# H최종 ⑤ 늘 바로 끝나는 차(되풀이): 점검마다 띄우고 로그는 3번 한도(4번째에 "더 남기지 않음")
+lreset; echo alldie > $PF/lmode; pfa "$PFL"' rm -f $DNSPID; tick; tick; tick; tick; tick; tick' > $PF/hf5 2>&1; lclean
+check "  H최종 ⑤: 늘 바로 끝나는 dnsmasq여도 6번 점검에 6번 이상 띄우고, '떠 있지 않음' 로그는 3번 + 한도 줄 1번" '[ "$(grep -c . $PF/lcalls)" -ge 6 ] && [ "$(grep -c "$FBMSG" $PF/hf5)" = 3 ] && [ "$(grep -c "더 남기지 않음" $PF/hf5)" -ge 1 ] && lleft'
+# H최종 ⑥(중간 3) 이 내비의 셸이 읽기·쓰기 열기를 받지 않음(확인 함수를 바꿔 침): 예전 방식, 로그 한 번
+lreset; echo alldie > $PF/lmode; pfa "$PFL"' dns_rw_ok() { return 1; }; rm -f $DNSPID; tick; tick' > $PF/hf6 2>&1; lclean
+check "  H최종 ⑥(중간 3): 셸이 FIFO 표준입력 열기를 받지 않으면 FIFO를 시도하지 않고 예전 방식, 로그는 한 번" '[ "$(grep -c "^other " $PF/lcalls)" = 2 ] && ! grep -q "^fifo " $PF/lcalls && [ "$(grep -c "셸이 FIFO 표준입력 열기를 받지 않음" $PF/hf6)" = 1 ] && lleft'
+lreset; pfa "$PFL"' rm -f $DNSPID; tick; alive' > $PF/hf6b 2>&1; lclean
+check "  H최종 ⑥: 받는 셸(PC sh)에서는 확인을 통과해 FIFO로 떠 살아 있음" '[ "$(grep -c . $PF/lcalls)" = 1 ] && grep -q "^fifo " $PF/lcalls && grep -q "^alive " $PF/hf6b && ! grep -q "받지 않음" $PF/hf6b && lleft'
+check "  H최종 ⑥(소스): 파일 본문에서 읽기·쓰기 열기(<>)는 eval 작은따옴표 문자열 안에만 있음(주석 빼고), sh -n 통과" '[ -z "$(grep -n "<>" $PKG/svc/hotspot.sh | grep -v "^[0-9]*: *#" | grep -v "eval '"'"'")" ] && [ "$(grep -n "<>" $PKG/svc/hotspot.sh | grep -v "^[0-9]*: *#" | grep -c "eval '"'"'")" -ge 2 ] && sh -n $PKG/svc/hotspot.sh'
+if command -v mksh >/dev/null 2>&1; then check "  H최종 ⑥(소스): mksh -n 통과" 'mksh -n $PKG/svc/hotspot.sh'; fi
+# H최종 ⑦(중간 2) $BB에 mkfifo·mknod가 없으면 함께 넣은 busybox(BB_OWN)로 만듦
+lreset; pfa 'BB='$PF'/bin/bbno; BB_OWN='$T'/bin/bb; '"$PFL"' rm -f $DNSPID; tick; alive' > $PF/hf7 2>&1; lclean
+check "  H최종 ⑦(중간 2): 내비 busybox에 mkfifo·mknod가 없으면 함께 넣은 busybox로 FIFO를 만들어 FIFO로 띄움" '[ "$(grep -c . $PF/lcalls)" = 1 ] && grep -q "^fifo " $PF/lcalls && grep -q "^alive " $PF/hf7 && ! grep -q "FIFO를 만들지 못함" $PF/hf7 && lleft'
+lreset; pfa 'BB='$PF'/bin/bbno; BB_OWN='$PF'/nobb; '"$PFL"' rm -f $DNSPID; tick; alive' > $PF/hf7b 2>&1; lclean
+check "  H최종 ⑦: 둘 다 못 만들면 예전 방식(오류 줄 없이), 살아 있음" '[ "$(grep -c . $PF/lcalls)" = 1 ] && grep -q "^other " $PF/lcalls && grep -q "^alive " $PF/hf7b && grep -q "FIFO를 만들지 못함" $PF/hf7b && ! grep -q -i "not found\|no such" $PF/hf7b && lleft'
+# H최종 ⑧(낮음 2) 좀비(상태 Z)는 살아 있다고 보지 않음
+pfa 'DNSPID=$W/dnsmasq.pid; echo "991 boot-P" > $DNSPID; mkdir -p $PROC/991; echo "991 (dnsmasq) Z 1 1" > $PROC/991/stat; our_dhcp_on && echo z-on || echo z-off; echo "991 (dnsmasq) S 1 1" > $PROC/991/stat; our_dhcp_on && echo s-on || echo s-off; rm -rf $PROC/991 $DNSPID' > $PF/hf8 2>&1
+check "  H최종 ⑧(낮음 2): our_dhcp_on은 좀비(Z) dnsmasq를 살아 있다고 보지 않음(S는 살아 있음)" 'grep -qx z-off $PF/hf8 && grep -qx s-on $PF/hf8'
+# H최종 ⑨(낮음 5) restart_hostapd 직후 두 번째 up()은 막 뜬 dnsmasq를 죽이지도 다시 띄우지도 않음
+lreset; pfa "$PFL"' rm -f $DNSPID; tick; read p0 b < $DNSPID; restart_hostapd; sleep; up; sleep; read p1 b < $DNSPID; echo "same=$([ "$p0" = "$p1" ] && echo y)"; alive' > $PF/hf9 2>&1; lclean
+check "  H최종 ⑨(낮음 5): restart_hostapd 뒤 이어진 up()은 살아 있는 dnsmasq를 그대로 둠(새로 띄우지 않음, 죽이지 않음)" '[ "$(grep -c . $PF/lcalls)" = 1 ] && grep -qx "same=y" $PF/hf9 && grep -q "^alive " $PF/hf9 && lleft'
+# H최종 ⑩(낮음 5) pid 파일이 남은 채 새 셸(서비스 다시 시작)로 시작: 살아 있으면 그대로, 죽었으면 FIFO로 새로 띄움
+lreset; pfa "$PFL"' rm -f $DNSPID; tick' > $PF/hf10a 2>&1; pfa "$PFL"' tick; alive' > $PF/hf10b 2>&1
+p0=$(awk '{print $2}' $PF/lcalls | head -1); kill $p0 2>/dev/null; i=0; while [ -d $PF/proc/$p0 ] && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done
+pfa "$PFL"' tick; alive' > $PF/hf10c 2>&1; lclean
+check "  H최종 ⑩(낮음 5): pid 파일이 남은 채 새 셸로 시작하면 살아 있는 dnsmasq는 그대로, 죽었으면 FIFO로 새로 띄움" '[ "$(grep -c "^fifo " $PF/lcalls)" = 2 ] && ! grep -q "^other " $PF/lcalls && grep -q "^alive " $PF/hf10b && grep -q "^alive " $PF/hf10c && ! grep -q "$FBMSG" $PF/hf10c && lleft'
+# --- 묶음 H 재리뷰(중간 1·2, 낮음 2) ---
+# 살아 있는 가짜 수와, 살아 있는 것이 pid 파일의 pid인지
+lalive() { n=0; for p in $(awk '{print $2}' $PF/lcalls 2>/dev/null); do [ -d $PF/proc/$p ] && n=$((n+1)); done; echo $n; }
+lpidok() { read p b < $PF/w/dnsmasq.pid; [ -d $PF/proc/$p ]; }
+# 중간 1 재현: 1초 확인이 "죽음"을 돌려준 사이에 그 프로세스가 dnsmasq가 됨 → 예전 방식을 띄우기 전에 끝내야 하나만 산다
+lreset; pfa "$PFL"' dns_fifo_died() { sleep; return 0; }; rm -f $DNSPID; tick' > $PF/hr1 2>&1
+hr1n=$(lalive); lpidok && hr1p=y || hr1p=n; lclean
+check "  H재리뷰 중간 1: 1초 확인이 '죽음'이라 한 사이 dnsmasq가 되어도, 예전 방식을 띄우기 전에 끝내 살아 있는 dnsmasq는 하나이고 pid 파일의 그 pid" '[ "$hr1n" = 1 ] && [ "$hr1p" = y ] && grep -q "^fifo " $PF/lcalls && grep -q "^other " $PF/lcalls && lleft'
+# 중간 1(stop_ours): 아직 dnsmasq로 바뀌지 않은 우리 자식(이번 부팅, 부모가 서비스 셸)도 끝내고, 직후 남는 것 0
+lreset; echo asshell > $PF/lmode; pfa "$PFL"' dns_fifo_died() { return 1; }; rm -f $DNSPID; tick; stop_ours; echo "pidfile=$([ -f $DNSPID ] && echo y)"' > $PF/hr2 2>&1
+hr2n=$(lalive); hr2l=$(lleft && echo y); lclean
+check "  H재리뷰 중간 1: stop_ours는 pid 파일의 우리 자식이 아직 dnsmasq가 아니어도 끝냄, 직후 남는 프로세스 0, pid 파일 지움" '[ "$hr2n" = 0 ] && [ "$hr2l" = y ] && grep -qx "pidfile=" $PF/hr2'
+lreset; pfa "$PFL"' rm -f $DNSPID; tick; stop_ours' > $PF/hr2b 2>&1; hr2bn=$(lalive); hr2bl=$(lleft && echo y); lclean
+check "  H재리뷰 중간 1: stop_ours 직후(따로 기다리지 않고) FIFO dnsmasq가 남지 않음" '[ "$hr2bn" = 0 ] && [ "$hr2bl" = y ]'
+pfa 'DNSPID=$W/dnsmasq.pid; mkdir -p $PROC/993; echo "993 (dnsmasq) S 1 1" > $PROC/993/stat; echo "993 boot-P" > $DNSPID; kill() { echo "kill $*"; }; stop_ours; mkdir -p $PROC/994; echo "994 (sh) S 1 1" > $PROC/994/stat; echo "994 boot-P" > $DNSPID; up() { :; }; dns_stuck && echo stuck-killed; echo "995 boot-OLD" > $DNSPID; mkdir -p $PROC/995; echo "995 (sh) S $$ 1" > $PROC/995/stat; dns_stuck && echo old-killed; rm -rf $PROC/993 $PROC/994 $PROC/995 $DNSPID' > $PF/hr2c 2>&1
+check "  H재리뷰 중간 1: 이름과 상관없이 끝내는 것은 이번 부팅·부모가 서비스 셸일 때만(부모가 다른 dnsmasq는 예전처럼 pid로만 끔, 다른 부팅 pid는 안 죽임)" 'grep -qx "kill 993" $PF/hr2c && ! grep -q "stuck-killed\|old-killed\|kill 994\|kill 995" $PF/hr2c'
+# 중간 2: restart_hostapd(설정 바뀜)로 FIFO를 새로 띄운 같은 회차의 두 번째 up()은 OK로 두지 않고, 다음 회차에서 OK
+lreset; pfa "$PFL"' rm -f $DNSPID; TICK_N=5; restart_hostapd; sleep; up; echo "ok1=$DNS_FIFO_OK"; tick; echo "ok2=$DNS_FIFO_OK"' > $PF/hr3 2>&1; lclean
+check "  H재리뷰 중간 2: FIFO로 띄운 회차와 같은 회차에서 살아 있음을 봐도 DNS_FIFO_OK가 아니고, 다음 30초 회차에서 OK" 'grep -qx "ok1=" $PF/hr3 && grep -qx "ok2=1" $PF/hr3 && [ "$(grep -c "^fifo " $PF/lcalls)" = 1 ] && lleft'
+check "  H재리뷰 중간 2(소스): 서비스 메인 반복이 30초 회차마다 TICK_N을 올림" 'awk "/^  while true; do\$/{f=1} f&&/TICK_N=/{print; exit}" $PKG/svc/hotspot.sh | grep -q "TICK_N=\$((\${TICK_N:-0}+1))"'
+# 낮음 2: our_dhcp_on은 읽기 전에 변수를 비우고, 읽기 오류가 새지 않게 { read …; } 2>/dev/null
+check "  H재리뷰 낮음 2(소스): our_dhcp_on은 pid 파일·stat을 읽기 전에 변수를 비우고 { read …; } 2>/dev/null 꼴로 읽음" '[ "$(awk "/^our_dhcp_on\(\) \{/,/^}/" $PKG/svc/hotspot.sh | grep -c "{ read .*; } 2>/dev/null")" = 2 ] && awk "/^our_dhcp_on\(\) \{/,/^}/" $PKG/svc/hotspot.sh | grep -q "_dp=; _db=" && awk "/^our_dhcp_on\(\) \{/,/^}/" $PKG/svc/hotspot.sh | grep -q "_dc=; _ds="'
+# 묶음 J 리뷰(낮음): dns_stuck은 끝났는지 1초 간격 세 번까지만 보고 넘어감. TERM을 무시하는 우리 자식(아직 dnsmasq가 아님)에서도
+# up()이 돌아오고(시험의 상한 20초 안), 그 자식은 그대로 남아 있음(기다리지 않음). sleep은 몇 번 불렸는지 센다
+mkdir -p $PF/binT; printf '#!/bin/sh\ntrap "" TERM\nmkdir -p %s/proc/$$; echo "$$ (sh) S $PPID 1" > %s/proc/$$/stat\necho "t $$" >> %s/tcalls\n: > %s/lstart.$$\nexec /bin/sleep 300\n' $PF $PF $PF $PF > $PF/binT/dnsmasq; chmod +x $PF/binT/dnsmasq
+rm -f $PF/tcalls $PF/w/dnsmasq.pid $PF/w/dnsmasq.in
+( pfa 'export PATH='$PF'/binT:$PATH; running() { return 0; }; PS=true; DNSPID=$W/dnsmasq.pid; dns_fifo_died() { return 1; }; NS=0
+sleep() { NS=$((NS+1)); read _p _b < $DNSPID 2>/dev/null; _i=0; while [ -n "$_p" ] && [ ! -f '$PF'/lstart.$_p ] && [ $_i -lt 200 ]; do command sleep 0.05; _i=$((_i+1)); done; }
+up; sleep; NS=0; DNS_FIFO_OK=; up; echo "returned sleeps=$NS"' > $PF/ht1 2>&1 ) & PFW=$!; ( sleep 20; kill $PFW 2>/dev/null ) >/dev/null 2>&1 & PFK=$!; wait $PFW 2>/dev/null; { kill $PFK; wait $PFK; } 2>/dev/null
+htn=$(for p in $(awk '{print $2}' $PF/tcalls 2>/dev/null); do kill -0 $p 2>/dev/null && echo $p; done | grep -c .); htp=$(awk 'NR == 1 { print $2 }' $PF/tcalls); htfirst=alive; i=0; while kill -0 $htp 2>/dev/null && [ $i -lt 100 ]; do sleep 0.05; i=$((i+1)); done; kill -0 $htp 2>/dev/null || htfirst=dead; for p in $(awk '{print $2}' $PF/tcalls 2>/dev/null); do kill -9 $p 2>/dev/null; rm -rf $PF/proc/$p; done
+check "  묶음 J 리뷰(낮음): TERM을 무시하는 우리 자식이어도 dns_stuck은 1초 간격 세 번만 보고 kill -9를 한 번 보낸 뒤 넘어가 up()이 돌아옴(그 자식은 끝남, 새로 띄운 것은 남음)" 'grep -q "^returned sleeps=" $PF/ht1 && [ "$(sed -n "s/^returned sleeps=//p" $PF/ht1)" -le 4 ] && [ "$htn" -ge 1 ] && [ "$htfirst" = dead ]'
+# 묶음 H 최종: FIFO 쪽은 eval 한 줄, 예전 방식은 세 줄. 옵션 낱말을 뽑아 비교한다(FIFO 쪽의 따옴표 "$WIF"만 맞춤)
+PFA1=$(sed -n "s/^ *eval 'dnsmasq \(.*\) >\/dev\/null 2>&1 <> .*/\1/p" $PKG/svc/hotspot.sh | sed 's/"//g' | tr -s ' ' '\n')
+PFA2=$(awk '/^ *dnsmasq --keep-in-foreground/ { f = 1 } f { s = s " " $0 } f && /dhcp-option=6 >\/dev\/null 2>&1 &$/ { print s; exit }' $PKG/svc/hotspot.sh | sed 's/\\//g; s/^ *dnsmasq //; s/ >\/dev\/null 2>&1 &$//' | tr -s ' ' '\n' | grep .)
+check "  리뷰 L1·묶음 H 최종: dnsmasq 옵션 두 벌이 글자까지 같음(표준입력 리다이렉션만 다름)" '[ -n "$PFA1" ] && [ "$PFA1" = "$PFA2" ] && [ "$(printf "%s\n" "$PFA1" | grep -c .)" = 10 ]'
+check "  PF-1(소스)·묶음 H 최종: dnsmasq를 파이프로 띄우지 않음(왼쪽 프로세스가 남지 않게), 띄우는 곳은 dns_launch 두 갈래뿐(예전 방식 한 줄, FIFO는 eval 한 줄)" '[ "$(grep -c "^ *dnsmasq --keep-in-foreground" $PKG/svc/hotspot.sh)" = 1 ] && ! grep -q "| *dnsmasq --keep" $PKG/svc/hotspot.sh && [ "$(grep -c "^ *eval .dnsmasq --keep-in-foreground .* >/dev/null 2>&1 <> \"[$]DNSIN\" &.$" $PKG/svc/hotspot.sh)" = 1 ] && [ "$(grep -v "^ *#" $PKG/svc/hotspot.sh | grep -v "^DNSMASQ=" | grep -c "dnsmasq --keep-in-foreground")" = 2 ]'
+# PF-5: /proc/net/dev 줄 꼴(이름 앞 탭, 콜론 뒤에 바로 숫자, 칸이 모자란 줄)
+pfreset; printf '\twlan0:1 1000 0 0 0 0 0 0 1 2000 0 0 0 0 0 0\n' > $PF/net/dev
+pf 'perf_begin; perf_tick; printf "wlan0:1 1030 0 2 0 0 0 0 1 2040 0 1 0 0 0 0\n" > $PROCNET/dev; perf_tick; printf " wlan0: 1 1040 0 2\n" > $PROCNET/dev; perf_tick' > $PF/out 2>&1
+check "PF-5: Wi-Fi 줄 고르기 — 이름 앞이 탭이거나 줄 맨 앞이어도, 콜론 뒤에 숫자가 붙어도 읽음. 칸이 모자라면 보낸 쪽만 '-'" '[ ! -s $PF/out ] && [ "$(sed -n 2p $PF/w/perf.log | grep -c " rx=30 tx=40 rxe=0 rxd=2 txe=0 txd=1 ")" = 1 ] && [ "$(sed -n 3p $PF/w/perf.log | grep -c " rx=10 tx=- rxe=0 rxd=0 txe=- txd=- ")" = 1 ]'
+check "  PF-5(소스): perf_tick에 continue와 두 자리 위치 인자가 없음" '[ "$(awk "/^perf_tick\(\) \{/,/^}/" $PKG/svc/hotspot.sh | grep -v "^ *#" | grep -c -E "continue|\\$\{1[0-9]\}")" = 0 ]'
+# 아무것도 없는 내비: 가짜 파일이 하나도 없는 빈 폴더를 가리킨다
+PF0=$T/pf0; mkdir -p $PF0/w $PF0/net $PF0/proc; printf '#!/bin/sh\nexit 0\n' > $PF/bin/logcat
+(KSTAT=$PF0/kstat LOADAVG=$PF0/load MEMINFO=$PF0/mem PROCNET=$PF0/net PROC=$PF0/proc CONF=$PF0/hk.conf APLOG=$PF0/ap.log W=$PF0/w UPTIME=$PF0/up; export KSTAT LOADAVG MEMINFO PROCNET PROC CONF APLOG W UPTIME
+ PATH=$PF/bin:$T/bin:/usr/bin:/bin:/sbin HOTSPOT_LIB=1 BB=$T/bin/bb BOOT_ID=$PF/bootid sh -c '. '$T'/app/svc/hotspot.sh; export PATH='$PF'/bin:'$T'/bin:/usr/bin:/bin:/sbin; '"$PFREP0") > $PF/rep2 2>&1
+check "  아무것도 못 읽는 내비에서도 오류 줄 없이 '읽지 못함'·'없음'으로 채움(제보 만들기를 멈추지 않음)" '[ "$(grep -c "읽지 못함" $PF/rep2)" -ge 6 ] && grep -q "부팅 뒤 -초$" $PF/rep2 && grep -q "^- 30초 측정 기록: 없음" $PF/rep2 && grep -q "^(없음)$" $PF/rep2 && ! grep -q -i "not found\|no such\|syntax\|division" $PF/rep2'
+check "  제보 파일(1-report.md)이 이 칸을 싣고, 3-log.txt가 perf.log를 실음(소스)" '[ "$(awk "/^report\(\) \{/,/^}/" $PKG/bin/status.sh | grep -c "^  perf_report$")" = 1 ] && [ "$(awk "/^logs\(\) \{/,/^}/" $PKG/bin/status.sh | grep -c "== perf.log (30초 측정 기록)")" = 1 ]'
 
 echo "---"
 [ $fails -eq 0 ] && echo "모두 통과" || { echo "실패 $fails개"; exit 1; }

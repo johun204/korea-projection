@@ -83,6 +83,8 @@ while kill -0 $p 2>/dev/null; do
 done
 wait $p 2>/dev/null
 rc=$?
+# 1.7.4(B-8): 끝난 뒤에는 pid를 비운다. 그 뒤(복사·sync 중) TERM이 오면 trap이 같은 번호를 새로 받은 다른 프로세스를 죽이지 않게
+p=
 sync
 ok=0; copied=0; maskfail=0
 if [ $rc = 0 ]; then

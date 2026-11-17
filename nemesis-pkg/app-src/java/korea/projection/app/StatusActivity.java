@@ -72,8 +72,13 @@ public class StatusActivity extends Activity implements View.OnClickListener, Ru
     long rbEl;
     /** 기다리는 재부팅 요청의 id(요청 파일 첫 칸). 결과 파일과 맞춰 본다 */
     long rbId;
-    /** 재리뷰 M2: 이어진 install·sysw 거절 수(이 화면이 살아 있는 동안) */
-    int rbStuck;
+    /**
+     * 1.7.4(B-7·B-8): 이어진 install·sysw 거절 기록 파일(앱 폴더, "<boot_id> <처음 거절 부팅 뒤 초> <마지막 거절 부팅 뒤 초>").
+     * 1.7.3은 화면 안의 횟수라 화면을 다시 열면 0이 됐다. 파일로 두어 다시 열어도 이어진다. 앱을 지우면 함께 지워진다
+     */
+    static final String RB_STUCK_NAME = "reboot-stuck.txt";
+    /** 리뷰 반영: 기록 파일을 쓰지 못했을 때 대신 쓰는 화면 안 값(같은 3칸 한 줄, 화면을 다시 열면 사라짐). 있으면 파일보다 먼저 본다 */
+    String rbStuckMem;
     String reqId;
     long reqEl;
     boolean reqFailed;
@@ -608,12 +613,27 @@ public class StatusActivity extends Activity implements View.OnClickListener, Ru
         if (el < rbEl) rbEl = el;
         // 리뷰 M2: root가 받지 않았다고 답했으면(설치 마무리 중 등) RB_WAIT초를 기다리지 않고 그 이유에 맞게 알린다
         Report res = Report.parse(read(RBRES));
-        String ans = Report.rbAnswer(res, boot, rbId, rbStuck);
+        File sf = new File(getFilesDir(), RB_STUCK_NAME);
+        long nowS = el / 1000;
+        // 화면 안 값이 있으면(파일 쓰기가 실패했던 경우) 그것이 가장 새 값이다
+        String st = rbStuckMem != null ? rbStuckMem : read(sf.getPath());
+        long since = Report.stuckSince(st, boot, nowS);
+        String ans = Report.rbAnswer(res, boot, rbId, since, nowS);
         if (ans == null && (el - rbEl) / 1000 < Report.RB_WAIT) return true;
-        // 답이 install·sysw 거절이면 이어진 수를 세고, 다른 답·답 없음이면 0으로
-        // 8~9장 리뷰 L3: guard(시간이 지나면 풀림)는 세지도 않고 앞의 수를 지우지도 않는다
-        if (ans != null && Report.rbStuckCode(res)) rbStuck++;
-        else if (!"guard".equals(res.get("code").trim()) || ans == null) rbStuck = 0;
+        // 답이 install·sysw 거절이면 처음 거절 시각(없으면 지금)과 이번 거절 시각을 남기고, 다른 답·답 없음이면 지운다.
+        // 파일을 쓰지 못하면 화면 안 값으로 대신한다. 8~9장 리뷰 L3: guard(시간이 지나면 풀림)는 기록을 만들지도 지우지도 않는다
+        if (ans != null && Report.rbStuckCode(res)) {
+            String line = Report.stuckLine(boot, since < 0 ? nowS : since, nowS);
+            if (writeText(sf, line)) rbStuckMem = null;
+            else {
+                // 쓰지 못했으면 옛 파일이 다음에 앞서지 않게 지우고 화면 안 값으로 이어 간다
+                rbStuckMem = line;
+                try { sf.delete(); } catch (Exception ignored) { }
+            }
+        } else if (!"guard".equals(res.get("code").trim()) || ans == null) {
+            rbStuckMem = null;
+            try { sf.delete(); } catch (Exception ignored) { }
+        }
         rbEl = 0;
         try { new File(getFilesDir(), RB_NAME).delete(); } catch (Exception ignored) { }
         // 아무도 답하지 않았으면(감시자 없음) 지금처럼 RESET 안내
@@ -622,6 +642,26 @@ public class StatusActivity extends Activity implements View.OnClickListener, Ru
         else showSave(ans, WARN, Color.BLACK);
         if (rebootBtn != null) rebootBtn.setEnabled(true);
         return false;
+    }
+
+    /** 1.7.4(B-7·B-8): 앱 폴더의 작은 파일 쓰기(임시 파일 → 이름 바꾸기). 실패하면 아무것도 남기지 않고 false */
+    static boolean writeText(File f, String text) {
+        File tmp = new File(f.getPath() + ".tmp");
+        java.io.FileOutputStream out = null;
+        boolean ok = false;
+        try {
+            out = new java.io.FileOutputStream(tmp);
+            out.write(text.getBytes("UTF-8"));
+            out.close();
+            out = null;
+            ok = tmp.renameTo(f);
+        } catch (Exception e) {
+            ok = false;
+        } finally {
+            if (out != null) try { out.close(); } catch (Exception ignored) { }
+        }
+        if (!ok) tmp.delete();
+        return ok;
     }
 
     /** 요청 파일 쓰기: 임시 파일 → 이름 바꾸기(root 쪽이 반쯤 쓴 파일을 읽지 않게). 내용은 Report.reqLine 한 줄 */

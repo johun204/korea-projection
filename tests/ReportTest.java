@@ -141,8 +141,8 @@ public class ReportTest {
         String STOCK = GOOD.replace("our_ap=yes", "our_ap=no").replace("our_dhcp=yes", "our_dhcp=no").replace("other_ap=no", "other_ap=yes")
             + "stock_ssid=carplay\nap_mode=stock\n";
         Report st = Report.parse(STOCK);
-        check("1.6.2: 순정 카플레이 AP → '준비됨(내비 Wi-Fi 사용)', 초록, 재부팅 안내 없음",
-            st.verdict().equals("무선 카플레이 준비됨(내비 Wi-Fi 사용). 아이폰은 설정 → 일반 → CarPlay에서 연결하세요.") && st.level() == 0 && !st.verdict().contains("재부팅"));
+        check("1.6.2·1.7.4 소유자 문구: 순정 카플레이 AP → '무선 카플레이 준비됨.', 초록, 재부팅 안내 없음",
+            st.verdict().equals("무선 카플레이 준비됨.") && st.level() == 0 && !st.verdict().contains("재부팅"));
         check("  순정 AP + 연결 수 있음 → '연결됨'", Report.parse(STOCK.replace("cp_conn=0", "cp_conn=1")).verdict().equals("무선 카플레이 연결됨"));
         check("  순정 AP여도 무선 모드가 꺼져 있으면 그 안내(빨강)", Report.parse(STOCK.replace("mod_on=yes", "mod_on=no")).verdict().contains("꺼져 있습니다") &&
             Report.parse(STOCK.replace("mod_on=yes", "mod_on=no")).level() == 2);
@@ -152,21 +152,22 @@ public class ReportTest {
         Report hs = Report.parse(GOOD.replace("our_ap=yes", "our_ap=no").replace("other_ap=no", "other_ap=yes") + "stock_ssid=hotspot\nap_mode=none\n");
         check("  순정 일반 핫스팟(ap_mode=none)은 예전처럼 '핫스팟이 꺼져' 안내, 노랑", hs.verdict().startsWith("핫스팟이 꺼져") && hs.level() == 1 &&
             "없음".equals(row(hs, "무선 카플레이 Wi-Fi")));
-        check("  ap_mode=ours는 예전과 같은 '준비됨'(1.7.3 U-4 문구)", Report.parse(GOOD + "stock_ssid=none\nap_mode=ours\n").verdict().equals("무선 카플레이 준비됨. 아이폰은 설정 → 일반 → CarPlay에서 연결하세요."));
+        check("  ap_mode=ours는 예전과 같은 '준비됨'(1.7.3 U-4 문구)", Report.parse(GOOD + "stock_ssid=none\nap_mode=ours\n").verdict().equals("무선 카플레이 준비됨."));
         check("  예전 상태 파일(ap_mode 없음)은 표 15줄 그대로", r.rows().size() == 15 && row(r, "무선 카플레이 Wi-Fi") == null);
         String sd = java.net.URLDecoder.decode(st.issueUrl(), "UTF-8");
         check("  QR 요약에 ap_mode·stock_ssid", sd.contains("ap_mode: stock") && sd.contains("stock_ssid: carplay"));
         Report off = Report.parse(GOOD.replace("our_ap=yes", "our_ap=no").replace("our_dhcp=yes", "our_dhcp=no") + "stock_ssid=none\nap_mode=none\nstock_seen=yes\n");
         check("  순정 AP를 쓰는 차인데 지금 꺼져 있으면 '내비 Wi-Fi가 꺼져' 안내(우리 핫스팟 재부팅 안내 아님), 노랑",
-            off.verdict().startsWith("내비 Wi-Fi(무선 카플레이용)가 지금 꺼져 있습니다") && off.level() == 1);
+            off.verdict().equals("Wi-Fi가 지금 꺼져 있습니다. 아이폰을 연결해 보고, 안 되면 내비를 3분 후 재부팅해 주세요.") && off.level() == 1);
         // 1.7.0: Wi-Fi 장치(wlan0)가 생기지 않아 핫스팟을 못 켬(그랜저 IG #52·#53)
         Report nw = Report.parse(GOOD.replace("our_ap=yes", "our_ap=no") + "nowlan=yes\nap_mode=none\n");
         check("1.7.0 wlan0 없음 → 'Wi-Fi 장치가 켜지지 않아' 안내(재부팅·리포트)", nw.verdict().startsWith("Wi-Fi 장치가 켜지지 않아 핫스팟을 켜지 못했습니다"));
         check("  nowlan=no면 예전 '핫스팟이 꺼져' 안내", Report.parse(GOOD.replace("our_ap=yes", "our_ap=no") + "nowlan=no\n").verdict().startsWith("핫스팟이 꺼져"));
-        check("  무선 AA 칸: aa=yes '켜짐', aa=no '꺼짐(kp-aa-off)', 표 줄 수는 그대로", row(Report.parse(GOOD + "aa=yes\n"), "무선 안드로이드 오토 기능").endsWith("· 켜짐")
-            && row(Report.parse(GOOD + "aa=no\n"), "무선 안드로이드 오토 기능").endsWith("· 꺼짐(kp-aa-off)") && Report.parse(GOOD + "aa=yes\n").rows().size() == 15);
+        // 1.7.4(L-9): 끄기 파일을 없애 무선 AA 칸에 켜짐·꺼짐(kp-aa-off)을 붙이지 않는다. 옛 상태 파일(aa=no)이어도 같다
+        check("  1.7.4 L-9: 무선 AA 칸은 feat_aa만(켜짐·꺼짐·kp-aa-off 없음), 표 줄 수는 그대로", row(Report.parse(GOOD + "aa=yes\n"), "무선 안드로이드 오토 기능").equals("예")
+            && row(Report.parse(GOOD + "aa=no\n"), "무선 안드로이드 오토 기능").equals("예") && Report.parse(GOOD).rows().size() == 15);
         String nq = java.net.URLDecoder.decode(Report.parse(GOOD + "state=reboot\naa=yes\nnowlan=yes\n").issueUrl(), "UTF-8");
-        check("  QR 요약에 state·aa·nowlan", nq.contains("state: reboot") && nq.contains("aa: yes") && nq.contains("nowlan: yes"));
+        check("  QR 요약에 state·nowlan, 1.7.4 L-9: aa는 넣지 않음", nq.contains("state: reboot") && !nq.contains("aa: ") && nq.contains("nowlan: yes"));
         // 1.7.1: 알림 기록(토스트 대신), 모드 업데이트 대기
         String nt = "1700000000 boot-A 첫 안내\n1700000100 boot-B 지난 부팅 안내\n1700000200 boot-A 두 번째 안내\n1700000300 boot-A 세 번째\n1700000400 boot-A 네 번째\nbroken\n1700000500 boot-A \n";
         java.util.List<String[]> ns = Report.notices(nt, "boot-A", 3);
@@ -275,19 +276,38 @@ public class ReportTest {
             Report.RB_FINISHING.equals(Report.rbAnswer(rr, "boot-A", 12345))
             && Report.RB_FINISHING.equals(Report.rbAnswer(Report.parse("id=12345\nboot=boot-A\ncode=install\n"), "boot-A", 12345))
             && Report.RB_FINISHING.equals("설정을 마무리하는 중입니다. 잠시 뒤 다시 눌러 주세요."));
-        // 베타 2 #64: HMG-API 부팅 보호를 부추기지 않으려는 거절(guard) → "2분 뒤에", 이어진 거절로 세지 않음
+        // 베타 2 #64: HMG-API 부팅 보호를 부추기지 않으려는 거절(guard), 이어진 거절로 세지 않음. 1.7.4(묶음 E): 사용자 문구는 3분으로 통일
         Report gd = Report.parse("id=6\nboot=boot-A\ncode=guard\n");
-        check("베타 2 #64: guard → '2분 안에 재부팅을 반복하면 … 2~5분 뒤에 다시 눌러 주세요.', 몇 번 이어져도 RESET 안내로 넘기지 않음",
-            Report.RB_GUARD.equals(Report.rbAnswer(gd, "boot-A", 6)) && Report.RB_GUARD.equals(Report.rbAnswer(gd, "boot-A", 6, 9)) && !Report.rbStuckCode(gd)
-            && Report.RB_GUARD.equals("2분 안에 재부팅을 반복하면 HMG-API가 무선 기능을 끕니다. 내비가 켜지고 2~5분 뒤에 다시 눌러 주세요."));
-        // 재리뷰 M2: 바깥 /system 작업(sysw)도 '마무리하는 중', install·sysw가 RB_STUCK_MAX번 넘게 이어지면 RESET 안내
+        check("베타 2 #64: guard → '3분 안에 재부팅을 반복하면 … 3~5분 뒤에 다시 눌러 주세요.', 몇 번 이어져도 RESET 안내로 넘기지 않음",
+            Report.RB_GUARD.equals(Report.rbAnswer(gd, "boot-A", 6)) && Report.RB_GUARD.equals(Report.rbAnswer(gd, "boot-A", 6, 0, 5000)) && !Report.rbStuckCode(gd)
+            && Report.RB_GUARD.equals("3분 안에 재부팅을 반복하면 HMG-API가 무선 기능을 끕니다. 내비가 켜지고 3~5분 뒤에 다시 눌러 주세요."));
+        // 재리뷰 M2·1.7.4(B-7·B-8): 바깥 /system 작업(sysw)도 '마무리하는 중', install·sysw 거절이 처음부터 RB_STUCK_SECS(900초) 넘게 이어지면 RESET 안내
         Report m2s = Report.parse("id=5\nboot=boot-A\ncode=sysw\n"), m2i = Report.parse("id=5\nboot=boot-A\ncode=install\n"),
             m2f = Report.parse("id=5\nboot=boot-A\ncode=fix\n");
-        check("재리뷰 M2: sysw → '마무리하는 중', install·sysw가 3번 이어진 뒤(4번째부터)는 RESET 안내, fix는 이어져도 '마무리하는 중'",
-            Report.RB_FINISHING.equals(Report.rbAnswer(m2s, "boot-A", 5)) && Report.RB_STUCK_MAX == 3
-            && Report.RB_FINISHING.equals(Report.rbAnswer(m2s, "boot-A", 5, 0)) && Report.RB_FINISHING.equals(Report.rbAnswer(m2i, "boot-A", 5, 2))
-            && Report.RB_FAILED.equals(Report.rbAnswer(m2s, "boot-A", 5, 3)) && Report.RB_FAILED.equals(Report.rbAnswer(m2i, "boot-A", 5, 7))
-            && Report.RB_FINISHING.equals(Report.rbAnswer(m2f, "boot-A", 5, 9)) && Report.rbAnswer(m2s, "boot-B", 5, 9) == null);
+        check("1.7.4 B-7·B-8: sysw → '마무리하는 중', install·sysw 거절이 처음 거절부터 900초 지나면 RESET 안내(횟수 아님), 시작 기록 없음(-1)·fix는 그대로",
+            Report.RB_FINISHING.equals(Report.rbAnswer(m2s, "boot-A", 5)) && Report.RB_STUCK_SECS == 900
+            && Report.RB_FINISHING.equals(Report.rbAnswer(m2s, "boot-A", 5, -1, 99999)) && Report.RB_FINISHING.equals(Report.rbAnswer(m2i, "boot-A", 5, 100, 999))
+            && Report.RB_FAILED.equals(Report.rbAnswer(m2s, "boot-A", 5, 100, 1000)) && Report.RB_FAILED.equals(Report.rbAnswer(m2i, "boot-A", 5, 0, 5000))
+            && Report.RB_FINISHING.equals(Report.rbAnswer(m2f, "boot-A", 5, 0, 99999)) && Report.rbAnswer(m2s, "boot-B", 5, 0, 99999) == null);
+        check("  B-7·B-8: 기록은 이번 부팅 것만 읽음(다른 부팅·깨진 값·음수·칸 수 틀림·빈 값 → -1), 쓴 줄을 그대로 다시 읽음",
+            Report.stuckSince(Report.stuckLine("boot-A", 123, 200), "boot-A", 300) == 123 && Report.stuckSince("boot-A 123 200", "boot-B", 300) == -1
+            && Report.stuckSince("boot-A x 200", "boot-A", 300) == -1 && Report.stuckSince("boot-A -5 200", "boot-A", 300) == -1
+            && Report.stuckSince(null, "boot-A", 300) == -1 && Report.stuckSince("boot-A 123", "boot-A", 300) == -1
+            && Report.stuckSince("boot-A 7 8", null, 300) == -1 && Report.stuckLine(" boot-A ", 9, 10).equals("boot-A 9 10\n"));
+        // 1.7.4(B-15): 차에서 처음 켜지는 AA 연결 상태 파일 조합(AA만 연결)이 화면·QR에 맞게 보임
+        Report aa15 = Report.parse(GOOD + "verdict=connected\nverdict_lv=0\nverdict_msg=무선 안드로이드 오토 연결됨, 카플레이 준비됨\ns1=설치: 끝남\ns2=무선 Wi-Fi: 켜짐\ns3=폰 연결: 안드로이드 오토 연결됨\n");
+        String aaq = java.net.URLDecoder.decode(aa15.issueUrl(), "UTF-8");
+        check("1.7.4 B-15: AA만 연결 상태 파일 → 판정 문구 그대로·초록, 요약 3번째 줄, QR 맨 앞 result: connected·verdict: connected",
+            aa15.verdict().equals("무선 안드로이드 오토 연결됨, 카플레이 준비됨") && aa15.level() == 0 && aa15.summary().contains("폰 연결: 안드로이드 오토 연결됨")
+            && aaq.contains("result: connected") && aaq.contains("verdict: connected") && aaq.indexOf("result: connected") < aaq.indexOf("verdict: connected"));
+        // 1.7.4(B-8 ②): 고정한 차만 "무선 모드 고정" 줄(판 번호 또는 판 모름), 고정 없으면 줄 없음
+        Report pinA = Report.parse("mod=yes\nmod_on=yes\nmod_pin=2.4.1\n"), pinB = Report.parse("mod=yes\nmod_on=yes\nmod_pin=old\n"), pinC = Report.parse("mod=yes\nmod_on=yes\nmod_pin=\n");
+        check("1.7.4 B-8 ②: 상태 화면 표에 '무선 모드 고정' 줄(2.4.1 / 고정됨(판 모름)), 고정 없으면 없음",
+            pinRow(pinA).equals("2.4.1") && pinRow(pinB).equals("고정됨(판 모름)") && pinRow(pinC) == null);
+        check("  B-7·B-8 리뷰: 마지막 거절에서 1800초(900의 2배) 넘게 비면 새로 시작(-1), 그 전이면 이어짐, 시각이 거꾸로면 -1",
+            Report.RB_STUCK_GAP == 1800 && Report.stuckSince("boot-A 100 200", "boot-A", 1999) == 100
+            && Report.stuckSince("boot-A 100 200", "boot-A", 2000) == -1 && Report.stuckSince("boot-A 300 200", "boot-A", 400) == -1
+            && Report.stuckSince("boot-A 100 200", "boot-A", 150) == -1);
         check("  베타 1: root가 더는 내지 않는 rw·state 코드는 '마무리하는 중'이 아님(모르는 값 → RESET 안내)",
             Report.RB_FAILED.equals(Report.rbAnswer(Report.parse("id=12345\nboot=boot-A\ncode=rw\n"), "boot-A", 12345))
             && Report.RB_FAILED.equals(Report.rbAnswer(Report.parse("id=12345\nboot=boot-A\ncode=state\n"), "boot-A", 12345)));
@@ -313,11 +333,12 @@ public class ReportTest {
         java.util.List<String[]> hn = Report.hints("boot=boot-A\naa_ready=\naa=\naa_t=\niph=nocp\niph_t=1700000990\nconf=\nconf_t=\n", "boot-A", 1700001000L);
         check("베타 1 리뷰 A: iph=nocp → '폰이 차 Wi-Fi에 연결됐지만 카플레이가 시작되지 않았습니다. 내비를 재부팅해 주세요.' 노랑",
             hn.size() == 1 && "1".equals(hn.get(0)[0]) && "폰이 차 Wi-Fi에 연결됐지만 카플레이가 시작되지 않았습니다. 내비를 재부팅해 주세요.".equals(hn.get(0)[1]));
-        check("2b U-4: 준비됨 문구: 무선 AA 켜진 차는 아이폰·안드로이드 둘 다, 꺼진 차·옛 상태 파일은 아이폰만, 순정 AP 차는 아이폰만",
-            Report.parse(GOOD + "aa=yes\n").verdict().equals(Report.READY_BOTH) && Report.READY_BOTH.contains("무선 Android Auto 사용")
-            && Report.parse(GOOD + "aa=no\n").verdict().startsWith("무선 카플레이 준비됨. 아이폰은 설정 → 일반 → CarPlay")
+        check("2b U-4·1.7.4 소유자 문구: 준비됨 문구: 무선 AA 켜진 차(순정 AP 차 포함)는 '무선 카플레이·안드로이드 오토 준비됨.', AA 끈 차·옛 상태 파일은 '무선 카플레이 준비됨.'",
+            Report.parse(GOOD + "aa=yes\n").verdict().equals(Report.READY_BOTH) && Report.READY_BOTH.equals("무선 카플레이·안드로이드 오토 준비됨.")
+            && Report.parse(GOOD + "aa=no\n").verdict().equals("무선 카플레이 준비됨.")
             && !Report.parse(GOOD + "aa=no\n").verdict().contains("안드로이드") && r.verdict().startsWith("무선 카플레이 준비됨")
-            && Report.parse(GOOD.replace("our_ap=yes", "our_ap=no").replace("our_dhcp=yes", "our_dhcp=no") + "ap_mode=stock\naa=yes\n").verdict().startsWith("무선 카플레이 준비됨(내비 Wi-Fi 사용). 아이폰은"));
+            && Report.parse(GOOD.replace("our_ap=yes", "our_ap=no").replace("our_dhcp=yes", "our_dhcp=no") + "ap_mode=stock\naa=yes\n").verdict().equals(Report.READY_BOTH)
+            && Report.parse(GOOD.replace("our_ap=yes", "our_ap=no").replace("our_dhcp=yes", "our_dhcp=no") + "ap_mode=stock\naa=no\n").verdict().equals("무선 카플레이 준비됨."));
         String nt2b = "1700000100 boot-A Korea Projection: 무선 카플레이를 설정하는 중입니다. 약 5분 동안 내비를 재부팅하거나 끄지 마세요.\n"
             + "1700000995 boot-A 무선 모드 적용에 실패했습니다.\n";
         java.util.List<String[]> n0 = Report.notices(nt2b, "boot-A", 3, now, 1800, pRb.progEndedAt("boot-A"));
@@ -365,4 +386,10 @@ public class ReportTest {
         System.out.println(fails == 0 ? "Java 모두 통과" : "Java 실패 " + fails + "개");
         System.exit(fails == 0 ? 0 : 1);
     }
+    /** 1.7.4: rows()에서 "무선 모드 고정" 줄의 값(없으면 null) */
+    static String pinRow(Report r) {
+        for (String[] row : r.rows()) if ("무선 모드 고정".equals(row[0])) return row[1];
+        return null;
+    }
+
 }

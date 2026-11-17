@@ -3,15 +3,15 @@ version=1.1
 id=korea.projection
 name=Korea Projection: Wireless for Korean Cars
 type=service,application
-package-version=1.7.3.2
+package-version=1.7.4.1
 short-desc="Wireless CarPlay and Android Auto for Korean Hyundai/Kia cars"
-detailed-desc="순정 핫스팟이 켜지지 않는 한국 차량에서 무선 카플레이와 무선 안드로이드 오토를 사용할 수 있습니다.
+detailed-desc="순정 핫스팟이 켜지지 않는 한국 현대·기아 차에서 무선 카플레이와 무선 안드로이드 오토를 쓸 수 있게 합니다.
 
-초기 설치 후 Launch를 누른 후 설치를 진행하십시오.
-경고: Launch를 누른 후 설치 진행 상황이 나올 때까지 약 10초간 기다려 주세요.
+설치 뒤 3~5분 기다려 Launch 화면에 설정을 마쳤다는 알림이 나오면 [지금 재부팅]이나 RESET 버튼으로 재부팅하세요.
 
-지원 확인이 되지 않은 차량은 QR코드를 통해 제보해 주세요.
-개선에 많은 도움이 됩니다.
+1.7.2 이하에서 올릴 때는 삭제 → 재부팅 → 설치 순서로 하세요.
+
+안 되면 USB를 꽂고 [제보 파일 만들기]를 눌러 GitHub 이슈로 보내 주세요.
 
 제작: hello@stopdragon.kr"
 os="*.KOR.*.260902,BDPE.KOR.*"

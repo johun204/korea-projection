@@ -85,14 +85,16 @@ if [ -f $BK/mod.ours ] && [ -f $HMGDATA/mods/$MOD_ID/mod.json ] && mod_kor && hm
   else
     echo "무선 모드 지우기 실패"
     modhold=1
-    modmsg=" HMG-API 앱에서 무선 모드(Wireless CarPlay + Android Auto)를 지우고 적용해 주세요."
+    # 1.7.4(B-3): 모드 이름이 2.4.2부터 "Korea Projection: Wireless CarPlay + Android Auto"다. 1.7.3까지 깔린 차는 옛 이름으로
+    # 보이므로 두 이름 모두에 든 "Wireless CarPlay + Android Auto"로 찾게 쓴다(문구만 바꿈, 동작·순서는 그대로)
+    modmsg=" HMG-API 앱에서 이름에 \"Wireless CarPlay + Android Auto\"가 든 무선 모드를 지우고 적용해 주세요."
   fi
 elif [ -f $BK/mod.ours ] && [ -f $HMGDATA/mods/$MOD_ID/mod.json ] && mod_kor; then
   # HMG-API 데몬이 응답하지 않으면 지울 수 없다. NEMESIS가 이 패키지의 백업 폴더($BK)를 지우므로 기록도 사라진다:
   # 차주에게 직접 지우라고 알린다.
   echo "HMG-API 데몬 응답 없음: 무선 모드를 지우지 못함"
   modhold=1
-  modmsg=" HMG-API 앱에서 무선 모드(Wireless CarPlay + Android Auto)를 지우고 적용해 주세요."
+  modmsg=" HMG-API 앱에서 이름에 \"Wireless CarPlay + Android Auto\"가 든 무선 모드를 지우고 적용해 주세요."
 fi
 # 1.7.2(P-14): fix_perms가 새로 쓴 무선 권한 파일을 지워 설치 전(파일 없음)으로 되돌린다. 무선 모드를 지운 뒤에 해야
 # HMG-API가 아직 관리하는 파일인지 바르게 본다. 우리 것만, 내용이 그대로일 때만(perms_revert 설명). 실패하면 그대로 둔다.

@@ -120,11 +120,8 @@ fresh; ready; early ':'; rc=$?
 check "설정이 끝난 동글 차: 부팅 완료 전에 드라이버·핫스팟·AA 신호를 켬" '[ $rc = 0 ] && [ $(calls insmod) = 1 ] && grep -q "^UP" $T/out && grep -q AASIG $T/out && grep -q "early=1" $T/out'
 fresh; ready; rm -f $T/iap2; early ':'; rc=$?
 check "무선 모드가 적용되지 않았으면(iap2.wifi≠t) 아무것도 안 함" '[ $rc = 1 ] && [ $(calls insmod) = 0 ] && ! grep -q "^UP" $T/out'
-fresh; ready; : > $T/bk/aa-off; early ':'; rc=$?
-check "AA 신호를 꺼 두었으면(aa-off) 아무것도 안 함" '[ $rc = 1 ] && [ $(calls insmod) = 0 ]'
 fresh; ready; rm -rf $T/usb/1-1; early ':'; rc=$?
 check "동글이 없으면 아무것도 안 함" '[ $rc = 1 ] && [ $(calls insmod) = 0 ]'
-fresh; ready; early 'parse_conf2=1'; rc=$?
 fresh; ready; run "printf '#!/bin/sh\necho t\n' > $T/bin/getprop; chmod +x $T/bin/getprop; parse_conf() { NS=2; }; up() { echo UP; }; dongle_early DEPEHEV.KOR.0000.V039.001.260902"; rc=$?
 check "softap.conf를 못 읽으면 드라이버를 올리지 않음" '[ $rc = 1 ] && [ $(calls insmod) = 0 ] && ! grep -q "^UP" $T/out'
 fresh; ready; early ':' ; run "printf '#!/bin/sh\necho t\n' > $T/bin/getprop; chmod +x $T/bin/getprop; dongle_early CVEV.USA.0000.V015.012.260507"; rc=$?

@@ -66,8 +66,9 @@ final class Report {
         if (nobb()) return "이 내비에서는 아직 동작하지 않습니다(지원 조사 중). 무선 설정은 하지 않았습니다.";
         // 1.7.3(K-5): 판정은 status.sh(kp_verdict) 한 곳에서 한다. 상태 파일에 결과가 있으면 그대로 보인다(리포트·QR과 같은 값).
         // 옛 상태 파일(1.7.2까지, verdict_msg 없음)이면 아래 예전 판정을 쓴다
+        // 1.7.4(리뷰 반영): 아래는 옛 상태 파일 전용이다. status.sh(kp_verdict)와 조건·문구가 다를 수 있다
         if (!get("verdict_msg").isEmpty()) return get("verdict_msg");
-        if (!yes("tested")) return "확인되지 않은 차입니다. 핫스팟은 켜지 않고 대기 중입니다. QR로 제보해 주세요.";
+        if (!yes("tested")) return "확인되지 않은 차입니다. QR로 제보해 주세요.";
         if (hmgapiVer().isEmpty()) return "HMG-API가 없습니다. HMG-API " + MIN_HMGAPI + " 이상을 설치해 주세요.";
         if (older(hmgapiVer(), MIN_HMGAPI) != 0)
             return "지원하지 않는 HMG-API 버전입니다. " + MIN_HMGAPI + " 이상으로 업데이트해 주세요.";
@@ -86,21 +87,24 @@ final class Report {
         if (!yes("feat_carplay")) return "무선 카플레이 기능이 꺼져 있습니다. HMG-API 무선 모드를 확인해 주세요.";
         // 1.6.2: 순정 카플레이 AP를 쓰는 차인데 지금 순정 Wi-Fi가 꺼져 있음(서비스는 우리 핫스팟을 켜지 않고 기다린다)
         if (!stockAp() && yes("stock_seen") && !yes("our_ap"))
-            return "내비 Wi-Fi(무선 카플레이용)가 지금 꺼져 있습니다. 아이폰을 연결해 보고, 안 되면 내비를 재부팅해 주세요.";
+            return "Wi-Fi가 지금 꺼져 있습니다. 아이폰을 연결해 보고, 안 되면 내비를 3분 후 재부팅해 주세요.";
         // 1.7.0: Wi-Fi 칩은 있는데 드라이버가 올라오지 않아 wlan0가 없다(그랜저 IG #52·#53). 재부팅으로 풀리는지 보고, 아니면 제보
         if (!stockAp() && yes("nowlan") && !yes("our_ap"))
             return "Wi-Fi 장치가 켜지지 않아 핫스팟을 켜지 못했습니다. 내비를 재부팅해 보시고, 그래도 같으면 USB를 꽂고 [제보 파일 만들기]로 리포트를 보내 주세요.";
-        if (!stockAp() && (!yes("our_ap") || !yes("our_dhcp"))) return "핫스팟이 꺼져 있습니다. 내비를 재부팅(RESET 버튼 또는 NEMESIS 재부팅)한 뒤 다시 확인해 주세요.";
+        if (!stockAp() && (!yes("our_ap") || !yes("our_dhcp"))) return "핫스팟이 꺼져 있습니다. 내비를 3분 후 재부팅(RESET 버튼 또는 NEMESIS 재부팅)한 뒤 다시 확인해 주세요.";
         if (older(get("nemesis"), MIN_NEMESIS) != 0)
             return "NEMESIS를 " + MIN_NEMESIS + " 이상으로 업데이트해 주세요.";
         if (!"0".equals(get("cp_conn")) && !get("cp_conn").isEmpty()) return "무선 카플레이 연결됨";
         // 1.7.3(U-4): 안드로이드도 쓰는 법을 알린다. 무선 AA가 꺼진 차(aa=no)·옛 상태 파일·순정 AP 차는 아이폰 문장만
-        if (stockAp()) return "무선 카플레이 준비됨(내비 Wi-Fi 사용). 아이폰은 설정 → 일반 → CarPlay에서 연결하세요.";
+        // 1.7.4(L-9): 새 상태 파일에는 aa 키가 없고 판정(verdict)이 있어 여기 오지 않는다. 판정이 없는 옛(1.7.2 이하) 파일만 aa를 본다
+        // 1.7.4(소유자 지시): Wi-Fi는 하나라 순정 Wi-Fi 차도 AA를 끄지 않았으면 둘 다 준비됨(status.sh kp_verdict와 같게)
+        if (stockAp()) return yes("aa") ? READY_BOTH : "무선 카플레이 준비됨.";
         if (yes("aa")) return READY_BOTH;
-        return "무선 카플레이 준비됨. 아이폰은 설정 → 일반 → CarPlay에서 연결하세요.";
+        return "무선 카플레이 준비됨.";
     }
 
-    static final String READY_BOTH = "무선 연결 준비됨. 아이폰은 설정 → 일반 → CarPlay, 안드로이드는 블루투스 연결 뒤 '무선 Android Auto 사용'을 누르세요.";
+    // 1.7.4(소유자 문구): 상태 화면 판정 문구와 같게(옛 상태 파일일 때만 쓰임)
+    static final String READY_BOTH = "무선 카플레이·안드로이드 오토 준비됨.";
 
     /** 1.7.3(U-6): "이 차는 안 됨"으로 끝나는 판정(verdict_end=yes) 아래 회색 한 줄 */
     static final String UNINSTALL_HINT = "지우려면 NEMESIS Manager → Korea Projection → Uninstall 뒤 재부팅하세요. 유선 카플레이는 그대로입니다.";
@@ -310,7 +314,7 @@ final class Report {
      * guard(HMG-API 부팅 보호, 2분 전) → RB_GUARD,
      * cmd(재부팅 명령이 돌아옴)와 모르는 값 → RB_FAILED.
      * 베타 1(니로 차 확인 2026-11-11): root가 /system 쓰기 모드(rw)·"재부팅 필요가 아님"(state)으로 거절하던 조건을 뺐다.
-     * 업데이트 직후 늘 rw라 "마무리하는 중"이 계속 나왔다. 이어진 거절 세기는 재리뷰 M2에서 install·sysw로 다시 두었다(아래 4인자)
+     * 업데이트 직후 늘 rw라 "마무리하는 중"이 계속 나왔다. 이어진 거절은 재리뷰 M2에서 install·sysw로 다시 두었고, 1.7.4에서 시간 기준으로 바꿨다(아래 5인자)
      */
     static String rbAnswer(Report res, String boot, long reqId) {
         if (boot == null || boot.trim().isEmpty() || reqId <= 0) return null;
@@ -329,10 +333,37 @@ final class Report {
      * 시간이 지나면 풀리므로 이어진 거절 세기(rbStuckCode)에 넣지 않는다
      */
     // 10장 확인 리뷰 3: root 거절은 zygote 시각 + 135초(커널 줄 없으면 부팅 뒤 300초)까지라 "2~5분"
-    static final String RB_GUARD = "2분 안에 재부팅을 반복하면 HMG-API가 무선 기능을 끕니다. 내비가 켜지고 2~5분 뒤에 다시 눌러 주세요.";
+    static final String RB_GUARD = "3분 안에 재부팅을 반복하면 HMG-API가 무선 기능을 끕니다. 내비가 켜지고 3~5분 뒤에 다시 눌러 주세요.";
 
-    /** 재리뷰 M2: 같은 이유(설치 중·바깥 /system 작업)로 이만큼 이어서 거절되면 그다음부터 RESET 안내로 넘긴다 */
-    static final int RB_STUCK_MAX = 3;
+    /**
+     * 1.7.4(B-7·B-8): 같은 이유(설치 중·바깥 /system 작업)로 이어진 거절이 처음 거절부터 이만큼(초) 지나도 계속되면 RESET 안내로 넘긴다.
+     * 1.7.3은 같은 화면에서 센 횟수(3번)였다: 화면을 다시 열면 0이 되고, 1분 안에 네 번 누르면 설치 중에도 RESET 안내가 나왔다.
+     * 900초는 root가 설치 진행 기록(run)을 멈춘 것으로 보는 시각(status.sh RB_STALE)과 같다
+     */
+    static final long RB_STUCK_SECS = 900;
+    /**
+     * 리뷰 반영: 거절과 다음 거절 사이가 이만큼(초, RB_STUCK_SECS의 2배) 넘게 비면 이어진 거절로 보지 않고 기록을 새로 시작한다
+     * (한참 전의 거절 하나 때문에 다음 거절에서 바로 RESET 안내가 나오지 않게)
+     */
+    static final long RB_STUCK_GAP = 2 * RB_STUCK_SECS;
+    /** 이어진 거절 기록(앱 폴더의 작은 파일) 한 줄: "<boot_id> <처음 거절 부팅 뒤 초> <마지막 거절 부팅 뒤 초>" */
+    static String stuckLine(String boot, long sinceSec, long lastSec) {
+        return (boot == null ? "" : boot.trim()) + " " + sinceSec + " " + lastSec + "\n";
+    }
+    /**
+     * 기록에서 이번 부팅(boot)의 처음 거절 시각(부팅 뒤 초). 없거나 다른 부팅·깨진 값이면 -1.
+     * 마지막 거절에서 nowSec까지 RB_STUCK_GAP 넘게 비었거나 시각이 거꾸로면 -1(새로 시작)
+     */
+    static long stuckSince(String text, String boot, long nowSec) {
+        if (text == null || boot == null || boot.trim().isEmpty()) return -1;
+        String[] f = text.trim().split("\\s+");
+        if (f.length != 3 || !f[0].equals(boot.trim())) return -1;
+        long since, last;
+        try { since = Long.parseLong(f[1]); last = Long.parseLong(f[2]); } catch (NumberFormatException e) { return -1; }
+        if (since < 0 || last < since || nowSec < last) return -1;
+        if (nowSec - last >= RB_STUCK_GAP) return -1;
+        return since;
+    }
 
     /** 오래 풀리지 않을 수 있는 거절(install 설치 중, sysw 바깥 /system 작업)인가. 우리 설치 마무리(fix)는 끝나면 풀리므로 넣지 않는다 */
     static boolean rbStuckCode(Report res) {
@@ -341,12 +372,13 @@ final class Report {
     }
 
     /**
-     * 재리뷰 M2: stuckBefore는 바로 앞까지 이어진 install·sysw 거절 수. 이번도 그렇고 앞서 RB_STUCK_MAX번 넘게 이어졌으면
-     * "잠시 뒤 다시" 대신 RESET 안내(RB_FAILED)를 준다(root 판단이 틀려 영영 막혀도 빠져나갈 길). 그 밖에는 rbAnswer와 같다
+     * 재리뷰 M2·1.7.4(B-7·B-8): stuckSince는 이번 부팅에 이어진 install·sysw 거절이 처음 난 부팅 뒤 초(없으면 -1), nowSec는 지금 부팅 뒤 초.
+     * 이번도 그렇고 처음 거절부터 RB_STUCK_SECS가 지났으면 "잠시 뒤 다시" 대신 RESET 안내(RB_FAILED)를 준다(root 판단이 틀려 영영
+     * 막혀도 빠져나갈 길). 그 밖에는 rbAnswer와 같다
      */
-    static String rbAnswer(Report res, String boot, long reqId, int stuckBefore) {
+    static String rbAnswer(Report res, String boot, long reqId, long stuckSince, long nowSec) {
         String a = rbAnswer(res, boot, reqId);
-        if (a != null && rbStuckCode(res) && stuckBefore >= RB_STUCK_MAX) return RB_FAILED;
+        if (a != null && rbStuckCode(res) && stuckSince >= 0 && nowSec - stuckSince >= RB_STUCK_SECS) return RB_FAILED;
         return a;
     }
     /**
@@ -377,7 +409,7 @@ final class Report {
             return "HMG-API에 이 차의 지도가 없어 훅이 꺼져 있습니다. QR로 제보해 주세요.";
         if ("mismatch".equals(m))
             return "HMG-API 지도가 이 차의 소프트웨어와 맞지 않아 훅이 꺼져 있습니다. QR로 제보해 주세요.";
-        return "HMG-API 훅이 꺼져 있습니다(마지막 부팅 기록). 내비를 재부팅(RESET 버튼 또는 NEMESIS 재부팅)한 뒤 다시 확인해 주세요.";
+        return "HMG-API 훅이 꺼져 있습니다(마지막 부팅 기록). 내비를 3분 후 재부팅(RESET 버튼 또는 NEMESIS 재부팅)한 뒤 다시 확인해 주세요.";
     }
 
     /** status.sh의 hmgapi 값("version 1.0.2 build 180185d 2026-11-04")에서 버전만. 없으면 "" */
@@ -629,13 +661,15 @@ final class Report {
         out.add(new String[] { "Korea Projection", get("pkgver") });
         out.add(new String[] { "HMG-API", ver(hmgapiVer(), MIN_HMGAPI) });
         out.add(new String[] { "HMG-API 무선 모드", modCell() });
+        // 1.7.4(B-8 ②): 되돌리기 USB로 고정한 차만 한 줄(mod_pin: 판 번호, old = 1.7.3 USB가 만든 판 번호 없는 고정)
+        String pin = get("mod_pin").trim();
+        if (!pin.isEmpty()) out.add(new String[] { "무선 모드 고정", "old".equals(pin) ? "고정됨(판 모름)" : pin });
         String h = get("hooks");
         out.add(new String[] { "HMG-API 훅", "on".equals(h) ? "켜짐" : "off".equals(h) ? "꺼짐 (" + (get("hookmap").isEmpty() ? "?" : get("hookmap")) + ", 마지막 부팅 기록)" : "-" });
         out.add(new String[] { "NEMESIS", ver(get("nemesis"), MIN_NEMESIS) });
         out.add(new String[] { "무선 카플레이 기능", yn("feat_carplay") });
-        // 1.7.0: 우리 무선 AA 설정(aa=yes 기본, no면 USB kp-aa-off로 끔). 줄 수는 그대로 둔다
-        String aa = get("aa");
-        out.add(new String[] { "무선 안드로이드 오토 기능", yn("feat_aa") + ("yes".equals(aa) ? " · 켜짐" : "no".equals(aa) ? " · 꺼짐(kp-aa-off)" : "") });
+        // 1.7.4(L-9): USB 파일로 무선 AA를 끄는 기능을 없애 켜짐·꺼짐 표시를 뺐다(늘 켜짐). 줄 수는 그대로 둔다
+        out.add(new String[] { "무선 안드로이드 오토 기능", yn("feat_aa") });
         out.add(new String[] { "Wi-Fi 장치", yn("wlan0") });
         String am = get("ap_mode");
         if (!am.isEmpty())
@@ -663,7 +697,7 @@ final class Report {
     String issueUrl() {
         // 중요한 것부터: 링크가 길면 뒤에서부터 뺀다 (product는 제목·항목에 따로 들어간다)
         String[] keys = { "support", "state", "platform", "targetdir", "pkgver", "tested", "feat_carplay", "ap_mode", "our_ap", "our_dhcp", "other_ap", "stock_ssid", "stock_seen",
-            "cp_conn", "aa", "nowlan", "wlan0", "softap_strings", "ssid_len", "pass_len", "wp", "mod", "mod_on", "bridge", "hooks", "hookmap", "feat_aa", "feat_wifi",
+            "cp_conn", "nowlan", "wlan0", "softap_strings", "ssid_len", "pass_len", "wp", "mod", "mod_on", "bridge", "hooks", "hookmap", "feat_aa", "feat_wifi",
             "wpa", "hmgapi", "nemesis", "made", "modver" };
         List<String> lines = new ArrayList<String>();
         lines.add("(QR summary)");

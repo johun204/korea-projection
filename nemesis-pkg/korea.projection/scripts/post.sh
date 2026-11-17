@@ -16,10 +16,8 @@ W=/data/local/tmp/korea.projection
 for u in /storage/usb0 /storage/usb1; do
   [ -f $u/korea-projection-debug ] && mkdir -p $W && : > $W/debug && echo "카플레이 디버그 로그 켬 ($W/cp.log)"
 done
-# 1.7.0 무선 안드로이드 오토(기본 켜짐): USB 맨 위의 kp-aa-off로 끄고 kp-aa-on으로 다시 켠다. 어느 USB든 끄기를 먼저 본다(리뷰 L3).
-# $BK에 남아 업데이트해도 유지된다(삭제하면 지워짐)
-if [ -f /storage/usb0/kp-aa-off ] || [ -f /storage/usb1/kp-aa-off ]; then : > $BK/aa-off; echo "무선 안드로이드 오토 끔"
-elif [ -f /storage/usb0/kp-aa-on ] || [ -f /storage/usb1/kp-aa-on ]; then rm -f $BK/aa-off; echo "무선 안드로이드 오토 켬"; fi
+# 1.7.4(L-9, 소유자 결정): 설치 때 USB의 kp-aa-off·kp-aa-on을 읽던 무선 안드로이드 오토 끄기·켜기를 없앴다(늘 켜짐).
+# 1.7.3 이하가 남긴 끄기 표시($BK/aa-off)는 서비스가 시작할 때 지운다(hotspot.sh main)
 HOTSPOT_LIB=1 . /data/nemesis/apps/korea.projection/svc/hotspot.sh
 # busybox가 없는 내비(K3 BDPE·K8 GL3HEV, #15·#19): 무선 설정은 하지 않는다(서비스도 대기만 함). 한 번 알린다
 # (1.7.1: 토스트 대신 notice: 설치 출력·ap.log·상태 화면 알림 기록).
